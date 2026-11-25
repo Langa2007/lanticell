@@ -1,0 +1,85 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-lanticell}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lanticell_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-lanticell}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ../../apps/control-api/migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lanticell}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  control-api:
+    build:
+      context: ../../apps/control-api
+      dockerfile: Dockerfile
+    environment:
+      CONTROL_API_PORT: ${CONTROL_API_PORT:-8080}
+      DATABASE_URL: ${DATABASE_URL:-postgres://lanticell:lanticell_dev_password@postgres:5432/lanticell?sslmode=disable}
+      JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-in-prod-32bytes}
+      ORIGIN_ENCRYPTION_KEY: ${ORIGIN_ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}
+      AGENT_TOKEN: ${AGENT_TOKEN:-dev-agent-token}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  gateway:
+    image: nginx:1.27-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ../../gateway/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - gateway_conf:/etc/nginx/conf.d
+      - gateway_certs:/etc/nginx/certs
+    depends_on:
+      - sample-origin
+
+  gateway-agent:
+    build:
+      context: ../../apps/gateway-agent
+      dockerfile: Dockerfile
+    environment:
+      GATEWAY_ID: ${GATEWAY_ID:-gw-local-01}
+      CONTROL_API_URL: http://control-api:8080
+      AGENT_TOKEN: ${AGENT_TOKEN:-dev-agent-token}
+      NGINX_CONFIG_DIR: /etc/nginx/conf.d
+      LAST_GOOD_DIR: /var/lib/lanticell/last-good
+    volumes:
+      - gateway_conf:/etc/nginx/conf.d
+      - gateway_lastgood:/var/lib/lanticell/last-good
+    depends_on:
+      - control-api
+      - gateway
+
+  dashboard:
+    build:
+      context: ../../apps/dashboard
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_BASE_URL: http://localhost:8080
+    depends_on:
+      - control-api
+
+  sample-origin:
+    image: hashicorp/http-echo:1.0
+    command: ["-listen=:9000", "-text=Lanticell protected sample origin OK"]
+    ports:
+      - "9000:9000"
+
+volumes:
+  pgdata:
+  gateway_conf:
+  gateway_certs:
+  gateway_lastgood:

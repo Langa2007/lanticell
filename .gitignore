@@ -1,0 +1,10 @@
+.env
+*.log
+bin/
+dist/
+node_modules/
+coverage.out
+/var/lib/lanticell/
+phases.md
+structure.md
+technical.md    

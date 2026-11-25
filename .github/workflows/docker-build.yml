@@ -1,0 +1,24 @@
+name: Docker Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  compose-and-images:
+    name: Validate Compose & Build Images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate Docker Compose config
+        run: docker compose -f deployments/compose/compose.yaml config -q
+
+      - name: Build service images
+        run: docker compose -f deployments/compose/compose.yaml build control-api gateway-agent dashboard

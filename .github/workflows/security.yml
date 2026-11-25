@@ -1,0 +1,52 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 3 * * 1'
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  govulncheck:
+    name: Go Vulnerability Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Scan Go modules
+        run: |
+          (cd packages/event-schema && govulncheck ./...)
+          (cd apps/control-api && govulncheck ./...)
+          (cd apps/gateway-agent && govulncheck ./...)
+
+  trivy:
+    name: Trivy Filesystem & Config Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: 'CRITICAL,HIGH'

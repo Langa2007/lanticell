@@ -15,17 +15,27 @@ import (
 
 var domainRegex = regexp.MustCompile(`^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,63}$`)
 
+type WAFExclusionRule struct {
+	RoutePrefix string     `json:"route_prefix"`
+	RuleID      string     `json:"rule_id"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+}
+
 type SiteRouteConfig struct {
-	SiteID           string `json:"site_id"`
-	TenantID         string `json:"tenant_id"`
-	Domain           string `json:"domain"`
-	TLSMode          string `json:"tls_mode"`
-	UpstreamURL      string `json:"upstream_url"`
-	OriginSecret     string `json:"origin_secret"`
-	ConnectTimeoutMs int    `json:"connect_timeout_ms"`
-	ReadTimeoutMs    int    `json:"read_timeout_ms"`
-	MaxBodyBytes     int64  `json:"max_body_bytes"`
-	RateLimitRPS     int    `json:"rate_limit_rps"`
+	SiteID              string             `json:"site_id"`
+	TenantID            string             `json:"tenant_id"`
+	Domain              string             `json:"domain"`
+	TLSMode             string             `json:"tls_mode"`
+	UpstreamURL         string             `json:"upstream_url"`
+	OriginSecret        string             `json:"origin_secret"`
+	ConnectTimeoutMs    int                `json:"connect_timeout_ms"`
+	ReadTimeoutMs       int                `json:"read_timeout_ms"`
+	MaxBodyBytes        int64              `json:"max_body_bytes"`
+	RateLimitRPS        int                `json:"rate_limit_rps"`
+	WAFMode             string             `json:"waf_mode"`
+	CRSVersion          string             `json:"crs_version"`
+	MaxInspectBodyBytes int64              `json:"max_inspect_body_bytes"`
+	WAFExclusions       []WAFExclusionRule `json:"waf_exclusions,omitempty"`
 }
 
 type ConfigBundle struct {
@@ -74,6 +84,14 @@ func VerifyAndValidate(bundle ConfigBundle, signingKey []byte) error {
 		}
 		if strings.ContainsAny(site.OriginSecret, ";{}\n\r\"") {
 			return errors.New("unsafe characters in origin_secret")
+		}
+		if site.WAFMode != "" && site.WAFMode != "off" && site.WAFMode != "monitor" && site.WAFMode != "block" {
+			return errors.New("invalid waf_mode for: " + site.Domain)
+		}
+		for _, ex := range site.WAFExclusions {
+			if !strings.HasPrefix(ex.RoutePrefix, "/") || strings.ContainsAny(ex.RoutePrefix, ";{}\n\r ") {
+				return errors.New("unsafe waf_exclusion route_prefix for: " + site.Domain)
+			}
 		}
 	}
 	return nil

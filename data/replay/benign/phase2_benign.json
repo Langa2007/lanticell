@@ -1,0 +1,45 @@
+[
+  {
+    "name": "normal_homepage_get",
+    "method": "GET",
+    "path": "/",
+    "query": "",
+    "headers": {"User-Agent": "Mozilla/5.0 (Linux; Android 13; Tecno Spark)"},
+    "body": ""
+  },
+  {
+    "name": "opera_mini_compressed_browser",
+    "method": "GET",
+    "path": "/news/kenya-tech-2026",
+    "query": "page=2&lang=sw",
+    "headers": {
+      "User-Agent": "Opera/9.80 (Android; Opera Mini/72.0.2254/191.303; U; en) Presto/2.12.423 Version/12.16",
+      "X-OperaMini-Features": "advanced, file_system, folding"
+    },
+    "body": ""
+  },
+  {
+    "name": "mpesa_daraja_webhook_json",
+    "method": "POST",
+    "path": "/api/webhooks/mpesa",
+    "query": "",
+    "headers": {"Content-Type": "application/json"},
+    "body": "{\"TransactionType\":\"Pay Bill\",\"TransID\":\"RKTQDM7W6S\",\"TransAmount\":\"1500.00\",\"MSISDN\":\"254712345678\",\"BillRefNumber\":\"INV-2026-009\"}"
+  },
+  {
+    "name": "normal_search_query",
+    "method": "GET",
+    "path": "/search",
+    "query": "q=solar+panels+nairobi&sort=price_asc",
+    "headers": {},
+    "body": ""
+  },
+  {
+    "name": "normal_checkout_post",
+    "method": "POST",
+    "path": "/api/v1/orders",
+    "query": "",
+    "headers": {"Content-Type": "application/json"},
+    "body": "{\"item_id\":\"sku_881\",\"quantity\":2,\"currency\":\"KES\"}"
+  }
+]

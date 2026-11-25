@@ -1,0 +1,65 @@
+[
+  {
+    "name": "sqli_union_select_query",
+    "method": "GET",
+    "path": "/products",
+    "query": "id=1' UNION SELECT username, password FROM users--",
+    "headers": {},
+    "body": "",
+    "expected_rule_id": "942100"
+  },
+  {
+    "name": "sqli_boolean_or_body",
+    "method": "POST",
+    "path": "/api/v1/login",
+    "query": "",
+    "headers": {"Content-Type": "application/json"},
+    "body": "{\"email\":\"admin@example.com' OR 1=1--\"}",
+    "expected_rule_id": "942100"
+  },
+  {
+    "name": "xss_script_tag",
+    "method": "GET",
+    "path": "/search",
+    "query": "q=<script>alert(document.cookie)</script>",
+    "headers": {},
+    "body": "",
+    "expected_rule_id": "941100"
+  },
+  {
+    "name": "xss_onerror_event_handler",
+    "method": "POST",
+    "path": "/profile",
+    "query": "",
+    "headers": {},
+    "body": "bio=<img src=x onerror=fetch('https://evil.test')>",
+    "expected_rule_id": "941100"
+  },
+  {
+    "name": "path_traversal_double_encoded",
+    "method": "GET",
+    "path": "/static/%252e%252e/%252e%252e/etc/passwd",
+    "query": "",
+    "headers": {},
+    "body": "",
+    "expected_rule_id": "930100"
+  },
+  {
+    "name": "protocol_anomaly_crlf_header",
+    "method": "GET",
+    "path": "/redirect",
+    "query": "next=/home\r\nSet-Cookie: admin=true",
+    "headers": {},
+    "body": "",
+    "expected_rule_id": "920100"
+  },
+  {
+    "name": "command_injection_pipe",
+    "method": "POST",
+    "path": "/api/tools/ping",
+    "query": "",
+    "headers": {},
+    "body": "host=127.0.0.1; id && whoami",
+    "expected_rule_id": "932100"
+  }
+]

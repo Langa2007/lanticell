@@ -12,20 +12,34 @@ import (
 	"github.com/lanticell/control-api/internal/store"
 )
 
-var domainRegex = regexp.MustCompile(`^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,63}$`)
+var (
+	domainRegex = regexp.MustCompile(`^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,63}$`)
+	ruleIDRegex = regexp.MustCompile(`^[0-9]{3,7}$`)
+)
+
+// WAFExclusionRule represents a scoped rule exclusion in the data-plane bundle.
+type WAFExclusionRule struct {
+	RoutePrefix string     `json:"route_prefix"`
+	RuleID      string     `json:"rule_id"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+}
 
 // SiteRouteConfig is the validated data-plane routing entry for one verified site.
 type SiteRouteConfig struct {
-	SiteID           string `json:"site_id"`
-	TenantID         string `json:"tenant_id"`
-	Domain           string `json:"domain"`
-	TLSMode          string `json:"tls_mode"`
-	UpstreamURL      string `json:"upstream_url"`
-	OriginSecret     string `json:"origin_secret"`
-	ConnectTimeoutMs int    `json:"connect_timeout_ms"`
-	ReadTimeoutMs    int    `json:"read_timeout_ms"`
-	MaxBodyBytes     int64  `json:"max_body_bytes"`
-	RateLimitRPS     int    `json:"rate_limit_rps"`
+	SiteID              string             `json:"site_id"`
+	TenantID            string             `json:"tenant_id"`
+	Domain              string             `json:"domain"`
+	TLSMode             string             `json:"tls_mode"`
+	UpstreamURL         string             `json:"upstream_url"`
+	OriginSecret        string             `json:"origin_secret"`
+	ConnectTimeoutMs    int                `json:"connect_timeout_ms"`
+	ReadTimeoutMs       int                `json:"read_timeout_ms"`
+	MaxBodyBytes        int64              `json:"max_body_bytes"`
+	RateLimitRPS        int                `json:"rate_limit_rps"`
+	WAFMode             string             `json:"waf_mode"`
+	CRSVersion          string             `json:"crs_version"`
+	MaxInspectBodyBytes int64              `json:"max_inspect_body_bytes"`
+	WAFExclusions       []WAFExclusionRule `json:"waf_exclusions,omitempty"`
 }
 
 // ConfigBundle is the signed, versioned payload fetched by gateway-agent.
@@ -76,10 +90,39 @@ func ValidateOrigin(upstreamURL string, connectMs, readMs int, maxBody int64, rp
 	return nil
 }
 
+// ValidateWAFPolicy validates WAF mode and inspection limits.
+func ValidateWAFPolicy(mode, crsVersion string, maxInspect int64) error {
+	if mode != "off" && mode != "monitor" && mode != "block" {
+		return errors.New("waf mode must be off, monitor, or block")
+	}
+	if strings.TrimSpace(crsVersion) == "" || strings.ContainsAny(crsVersion, ";{}\n\r ") {
+		return errors.New("invalid crs_version")
+	}
+	if maxInspect < 1024 || maxInspect > 10485760 {
+		return errors.New("max_inspect_body_bytes must be between 1KB and 10MB")
+	}
+	return nil
+}
+
+// ValidateWAFExclusion validates a scoped WAF rule exclusion.
+func ValidateWAFExclusion(routePrefix, ruleID, reason string) error {
+	if !strings.HasPrefix(routePrefix, "/") || strings.ContainsAny(routePrefix, ";{}\n\r ") {
+		return errors.New("route_prefix must start with / and contain no whitespace or control chars")
+	}
+	if !ruleIDRegex.MatchString(ruleID) {
+		return errors.New("rule_id must be a numeric CRS rule ID")
+	}
+	if strings.TrimSpace(reason) == "" {
+		return errors.New("reason is required for auditability")
+	}
+	return nil
+}
+
 // BuildSignedBundle builds and signs the active gateway configuration bundle.
 func BuildSignedBundle(st *store.Store, encKey, signingKey []byte) (ConfigBundle, error) {
 	version, sites, origins := st.ActiveSitesWithOrigins()
 	routes := make([]SiteRouteConfig, 0, len(sites))
+	now := time.Now().UTC()
 
 	for _, site := range sites {
 		if err := ValidateDomain(site.Domain); err != nil {
@@ -93,17 +136,35 @@ func BuildSignedBundle(st *store.Store, encKey, signingKey []byte) (ConfigBundle
 		if err != nil {
 			return ConfigBundle{}, err
 		}
+		wafPol := st.GetWAFPolicy(site.TenantID, site.ID)
+		rawExclusions, _ := st.ListWAFExclusions(site.TenantID, site.ID)
+		activeExclusions := make([]WAFExclusionRule, 0, len(rawExclusions))
+		for _, ex := range rawExclusions {
+			if ex.ExpiresAt != nil && ex.ExpiresAt.Before(now) {
+				continue
+			}
+			activeExclusions = append(activeExclusions, WAFExclusionRule{
+				RoutePrefix: ex.RoutePrefix,
+				RuleID:      ex.RuleID,
+				ExpiresAt:   ex.ExpiresAt,
+			})
+		}
+
 		routes = append(routes, SiteRouteConfig{
-			SiteID:           site.ID,
-			TenantID:         site.TenantID,
-			Domain:           site.Domain,
-			TLSMode:          site.TLSMode,
-			UpstreamURL:      origin.UpstreamURL,
-			OriginSecret:     secret,
-			ConnectTimeoutMs: origin.ConnectTimeoutMs,
-			ReadTimeoutMs:    origin.ReadTimeoutMs,
-			MaxBodyBytes:     origin.MaxBodyBytes,
-			RateLimitRPS:     origin.RateLimitRPS,
+			SiteID:              site.ID,
+			TenantID:            site.TenantID,
+			Domain:              site.Domain,
+			TLSMode:             site.TLSMode,
+			UpstreamURL:         origin.UpstreamURL,
+			OriginSecret:        secret,
+			ConnectTimeoutMs:    origin.ConnectTimeoutMs,
+			ReadTimeoutMs:       origin.ReadTimeoutMs,
+			MaxBodyBytes:        origin.MaxBodyBytes,
+			RateLimitRPS:        origin.RateLimitRPS,
+			WAFMode:             wafPol.Mode,
+			CRSVersion:          wafPol.CRSVersion,
+			MaxInspectBodyBytes: wafPol.MaxInspectBodyBytes,
+			WAFExclusions:       activeExclusions,
 		})
 	}
 

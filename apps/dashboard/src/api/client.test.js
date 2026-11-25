@@ -35,3 +35,22 @@ test('createApiClient throws API error message on non-OK status', async () => {
   const api = createApiClient({ baseUrl: 'http://localhost:8080', fetchImpl: mockFetch });
   await assert.rejects(() => api.createSite({ domain: 'bad' }), /invalid domain format/);
 });
+
+test('createApiClient calls WAF policy and exclusion endpoints', async () => {
+  const calls = [];
+  const mockFetch = async (url, opts) => {
+    calls.push({ url, method: opts.method });
+    return { ok: true, status: 200, json: async () => ({ status: 'ok' }) };
+  };
+
+  const api = createApiClient({ baseUrl: 'http://localhost:8080', fetchImpl: mockFetch });
+  await api.upsertWafPolicy('s1', { mode: 'block' });
+  await api.addWafExclusion('s1', { route_prefix: '/api/webhooks/mpesa', rule_id: '942100', reason: 'test' });
+  await api.listSecurityEvents();
+
+  assert.deepEqual(calls, [
+    { url: 'http://localhost:8080/api/v1/sites/s1/waf', method: 'PUT' },
+    { url: 'http://localhost:8080/api/v1/sites/s1/waf/exclusions', method: 'POST' },
+    { url: 'http://localhost:8080/api/v1/security-events', method: 'GET' }
+  ]);
+});

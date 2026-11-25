@@ -53,10 +53,17 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/sites/{id}/verify-dns", s.requireAuth(s.requireWriteRole(http.HandlerFunc(s.handleVerifyDNS))))
 	mux.Handle("PUT /api/v1/sites/{id}/origin", s.requireAuth(s.requireWriteRole(http.HandlerFunc(s.handleUpsertOrigin))))
 	mux.Handle("POST /api/v1/sites/{id}/verify-lockdown", s.requireAuth(http.HandlerFunc(s.handleVerifyLockdown)))
+	mux.Handle("GET /api/v1/sites/{id}/waf", s.requireAuth(http.HandlerFunc(s.handleGetWAFPolicy)))
+	mux.Handle("PUT /api/v1/sites/{id}/waf", s.requireAuth(s.requireWriteRole(http.HandlerFunc(s.handleUpsertWAFPolicy))))
+	mux.Handle("GET /api/v1/sites/{id}/waf/exclusions", s.requireAuth(http.HandlerFunc(s.handleListWAFExclusions)))
+	mux.Handle("POST /api/v1/sites/{id}/waf/exclusions", s.requireAuth(s.requireWriteRole(http.HandlerFunc(s.handleAddWAFExclusion))))
+	mux.Handle("DELETE /api/v1/sites/{id}/waf/exclusions/{exclusionId}", s.requireAuth(s.requireWriteRole(http.HandlerFunc(s.handleDeleteWAFExclusion))))
+	mux.Handle("GET /api/v1/security-events", s.requireAuth(http.HandlerFunc(s.handleListSecurityEvents)))
 	mux.Handle("GET /api/v1/audit-logs", s.requireAuth(http.HandlerFunc(s.handleListAuditLogs)))
 
 	mux.Handle("GET /api/v1/agent/config", s.requireAgentAuth(http.HandlerFunc(s.handleAgentConfig)))
 	mux.Handle("POST /api/v1/agent/health", s.requireAgentAuth(http.HandlerFunc(s.handleAgentHealth)))
+	mux.Handle("POST /api/v1/agent/events", s.requireAgentAuth(http.HandlerFunc(s.handleAgentEvents)))
 
 	return withCORS(mux)
 }
@@ -385,6 +392,151 @@ func (s *Server) handleAgentHealth(w http.ResponseWriter, r *http.Request) {
 	node.LastSeenAt = time.Now().UTC()
 	s.Store.UpsertGatewayHealth(node)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "recorded"})
+}
+
+func (s *Server) handleGetWAFPolicy(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	siteID := r.PathValue("id")
+	if _, err := s.Store.GetSite(claims.TenantID, siteID); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	pol := s.Store.GetWAFPolicy(claims.TenantID, siteID)
+	writeJSON(w, http.StatusOK, pol)
+}
+
+func (s *Server) handleUpsertWAFPolicy(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	siteID := r.PathValue("id")
+	if _, err := s.Store.GetSite(claims.TenantID, siteID); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	var req struct {
+		Mode                string `json:"mode"`
+		CRSVersion          string `json:"crs_version"`
+		MaxInspectBodyBytes int64  `json:"max_inspect_body_bytes"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if req.CRSVersion == "" {
+		req.CRSVersion = "4.10.0"
+	}
+	if req.MaxInspectBodyBytes == 0 {
+		req.MaxInspectBodyBytes = 131072
+	}
+	if err := configpublish.ValidateWAFPolicy(req.Mode, req.CRSVersion, req.MaxInspectBodyBytes); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	pol := store.WAFPolicy{
+		SiteID:              siteID,
+		TenantID:            claims.TenantID,
+		Mode:                req.Mode,
+		CRSVersion:          req.CRSVersion,
+		MaxInspectBodyBytes: req.MaxInspectBodyBytes,
+		UpdatedAt:           time.Now().UTC(),
+	}
+	if err := s.Store.UpsertWAFPolicy(pol); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	s.recordAudit(claims.TenantID, claims.UserID, "waf.policy_update", "site", siteID, map[string]string{"mode": pol.Mode, "crs_version": pol.CRSVersion})
+	writeJSON(w, http.StatusOK, pol)
+}
+
+func (s *Server) handleListWAFExclusions(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	siteID := r.PathValue("id")
+	list, err := s.Store.ListWAFExclusions(claims.TenantID, siteID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"exclusions": list})
+}
+
+func (s *Server) handleAddWAFExclusion(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	siteID := r.PathValue("id")
+	var req struct {
+		RoutePrefix string     `json:"route_prefix"`
+		RuleID      string     `json:"rule_id"`
+		Reason      string     `json:"reason"`
+		ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if req.RoutePrefix == "" {
+		req.RoutePrefix = "/"
+	}
+	if err := configpublish.ValidateWAFExclusion(req.RoutePrefix, req.RuleID, req.Reason); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	exID, _ := crypto.RandomHex(12)
+	ex := store.WAFExclusion{
+		ID:          exID,
+		TenantID:    claims.TenantID,
+		SiteID:      siteID,
+		RoutePrefix: req.RoutePrefix,
+		RuleID:      req.RuleID,
+		Reason:      req.Reason,
+		ExpiresAt:   req.ExpiresAt,
+		CreatedBy:   claims.UserID,
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := s.Store.AddWAFExclusion(ex); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	s.recordAudit(claims.TenantID, claims.UserID, "waf.exclusion_add", "waf_exclusion", ex.ID, map[string]string{"site_id": siteID, "rule_id": ex.RuleID})
+	writeJSON(w, http.StatusCreated, ex)
+}
+
+func (s *Server) handleDeleteWAFExclusion(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	siteID := r.PathValue("id")
+	exID := r.PathValue("exclusionId")
+	if err := s.Store.DeleteWAFExclusion(claims.TenantID, siteID, exID); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	s.recordAudit(claims.TenantID, claims.UserID, "waf.exclusion_delete", "waf_exclusion", exID, map[string]string{"site_id": siteID})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (s *Server) handleListSecurityEvents(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	events := s.Store.ListSecurityEvents(claims.TenantID)
+	writeJSON(w, http.StatusOK, map[string]any{"events": events})
+}
+
+func (s *Server) handleAgentEvents(w http.ResponseWriter, r *http.Request) {
+	var ev store.SecurityEvent
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32*1024)).Decode(&ev); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if ev.TenantID == "" || ev.SiteID == "" || ev.RuleID == "" {
+		writeError(w, http.StatusBadRequest, "tenant_id, site_id, and rule_id are required")
+		return
+	}
+	if ev.ID == "" {
+		ev.ID, _ = crypto.RandomHex(12)
+	}
+	if ev.SchemaVersion == "" {
+		ev.SchemaVersion = "1.0"
+	}
+	if ev.CreatedAt.IsZero() {
+		ev.CreatedAt = time.Now().UTC()
+	}
+	s.Store.AppendSecurityEvent(ev)
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 }
 
 func (s *Server) requireAuth(next http.Handler) http.Handler {

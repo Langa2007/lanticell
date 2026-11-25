@@ -76,28 +76,69 @@ type GatewayNode struct {
 	LastSeenAt     time.Time `json:"last_seen_at"`
 }
 
+type WAFPolicy struct {
+	SiteID              string    `json:"site_id"`
+	TenantID            string    `json:"tenant_id"`
+	Mode                string    `json:"mode"` // off | monitor | block
+	CRSVersion          string    `json:"crs_version"`
+	MaxInspectBodyBytes int64     `json:"max_inspect_body_bytes"`
+	UpdatedAt           time.Time `json:"updated_at"`
+}
+
+type WAFExclusion struct {
+	ID          string     `json:"id"`
+	TenantID    string     `json:"tenant_id"`
+	SiteID      string     `json:"site_id"`
+	RoutePrefix string     `json:"route_prefix"`
+	RuleID      string     `json:"rule_id"`
+	Reason      string     `json:"reason"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+	CreatedBy   string     `json:"created_by"`
+	CreatedAt   time.Time  `json:"created_at"`
+}
+
+type SecurityEvent struct {
+	ID            string    `json:"id"`
+	SchemaVersion string    `json:"schema_version"`
+	CorrelationID string    `json:"correlation_id"`
+	TenantID      string    `json:"tenant_id"`
+	SiteID        string    `json:"site_id"`
+	Route         string    `json:"route"`
+	RuleID        string    `json:"rule_id"`
+	CRSVersion    string    `json:"crs_version"`
+	Action        string    `json:"action"` // allow | observe | block
+	Confidence    float64   `json:"confidence"`
+	ReasonCode    string    `json:"reason_code"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
 // Store defines tenant-isolated persistence operations.
 type Store struct {
-	mu          sync.RWMutex
-	tenants     map[string]Tenant
-	usersByMail map[string]User
-	memberships map[string]Membership // key: userID + ":" + tenantID
-	sites       map[string]Site
-	origins     map[string]Origin // key: siteID
-	auditLogs   []AuditLog
-	gateways    map[string]GatewayNode
-	version     int64
+	mu             sync.RWMutex
+	tenants        map[string]Tenant
+	usersByMail    map[string]User
+	memberships    map[string]Membership // key: userID + ":" + tenantID
+	sites          map[string]Site
+	origins        map[string]Origin // key: siteID
+	wafPolicies    map[string]WAFPolicy // key: siteID
+	wafExclusions  map[string][]WAFExclusion // key: siteID
+	securityEvents []SecurityEvent
+	auditLogs      []AuditLog
+	gateways       map[string]GatewayNode
+	version        int64
 }
 
 func NewStore() *Store {
 	return &Store{
-		tenants:     make(map[string]Tenant),
-		usersByMail: make(map[string]User),
-		memberships: make(map[string]Membership),
-		sites:       make(map[string]Site),
-		origins:     make(map[string]Origin),
-		gateways:    make(map[string]GatewayNode),
-		version:     1,
+		tenants:       make(map[string]Tenant),
+		usersByMail:   make(map[string]User),
+		memberships:   make(map[string]Membership),
+		sites:         make(map[string]Site),
+		origins:       make(map[string]Origin),
+		wafPolicies:   make(map[string]WAFPolicy),
+		wafExclusions: make(map[string][]WAFExclusion),
+		gateways:      make(map[string]GatewayNode),
+		version:       1,
 	}
 }
 
@@ -258,4 +299,108 @@ func (s *Store) ActiveSitesWithOrigins() (int64, []Site, map[string]Origin) {
 		}
 	}
 	return s.version, sites, origins
+}
+
+func (s *Store) UpsertWAFPolicy(p WAFPolicy) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	site, ok := s.sites[p.SiteID]
+	if !ok {
+		return ErrNotFound
+	}
+	if site.TenantID != p.TenantID {
+		return ErrForbidden
+	}
+	s.wafPolicies[p.SiteID] = p
+	s.version++
+	return nil
+}
+
+func (s *Store) GetWAFPolicy(tenantID, siteID string) WAFPolicy {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if p, ok := s.wafPolicies[siteID]; ok && p.TenantID == tenantID {
+		return p
+	}
+	return WAFPolicy{
+		SiteID:              siteID,
+		TenantID:            tenantID,
+		Mode:                "monitor",
+		CRSVersion:          "4.10.0",
+		MaxInspectBodyBytes: 131072,
+	}
+}
+
+func (s *Store) AddWAFExclusion(ex WAFExclusion) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	site, ok := s.sites[ex.SiteID]
+	if !ok {
+		return ErrNotFound
+	}
+	if site.TenantID != ex.TenantID {
+		return ErrForbidden
+	}
+	s.wafExclusions[ex.SiteID] = append(s.wafExclusions[ex.SiteID], ex)
+	s.version++
+	return nil
+}
+
+func (s *Store) ListWAFExclusions(tenantID, siteID string) ([]WAFExclusion, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	site, ok := s.sites[siteID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if site.TenantID != tenantID {
+		return nil, ErrForbidden
+	}
+	list := s.wafExclusions[siteID]
+	out := make([]WAFExclusion, len(list))
+	copy(out, list)
+	return out, nil
+}
+
+func (s *Store) DeleteWAFExclusion(tenantID, siteID, exclusionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	site, ok := s.sites[siteID]
+	if !ok {
+		return ErrNotFound
+	}
+	if site.TenantID != tenantID {
+		return ErrForbidden
+	}
+	list := s.wafExclusions[siteID]
+	for i, ex := range list {
+		if ex.ID == exclusionID {
+			s.wafExclusions[siteID] = append(list[:i], list[i+1:]...)
+			s.version++
+			return nil
+		}
+	}
+	return ErrNotFound
+}
+
+func (s *Store) AppendSecurityEvent(ev SecurityEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Keep bounded in-memory buffer of recent events
+	if len(s.securityEvents) >= 5000 {
+		s.securityEvents = s.securityEvents[1:]
+	}
+	s.securityEvents = append(s.securityEvents, ev)
+}
+
+func (s *Store) ListSecurityEvents(tenantID string) []SecurityEvent {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]SecurityEvent, 0)
+	for i := len(s.securityEvents) - 1; i >= 0; i-- {
+		if s.securityEvents[i].TenantID == tenantID {
+			out = append(out, s.securityEvents[i])
+		}
+	}
+	return out
 }

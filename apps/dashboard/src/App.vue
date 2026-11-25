@@ -57,14 +57,14 @@
               <button v-if="site.status === 'pending_verification'" class="btn-secondary" @click="verifySite(site.id)">
                 Verify DNS
               </button>
-              <button class="btn-secondary" @click="selectedSiteId = site.id">Configure Origin</button>
+              <button class="btn-secondary" @click="selectSite(site.id)">Configure</button>
             </div>
           </li>
         </ul>
       </div>
 
       <div v-if="selectedSiteId" class="card">
-        <h2>Origin Configuration</h2>
+        <h2>Origin &amp; WAF Policy</h2>
         <form @submit.prevent="saveOrigin">
           <label>
             Upstream URL
@@ -78,6 +78,45 @@
           <button type="button" class="btn-secondary" @click="checkLockdown">Verify Origin Lockdown</button>
         </form>
         <p v-if="lockdownResult" class="meta">{{ lockdownResult }}</p>
+
+        <hr class="divider" />
+        <h3>WAF Mode (Coraza + OWASP CRS {{ wafForm.crs_version }})</h3>
+        <form @submit.prevent="saveWaf" class="row-form">
+          <select v-model="wafForm.mode">
+            <option value="monitor">Monitor (Log Only)</option>
+            <option value="block">Block</option>
+            <option value="off">Off</option>
+          </select>
+          <input v-model.number="wafForm.max_inspect_body_bytes" type="number" min="1024" max="10485760" />
+          <button type="submit" class="btn-primary">Update WAF</button>
+        </form>
+
+        <h3>Scoped Rule Exclusions</h3>
+        <form @submit.prevent="addExclusion" class="row-form">
+          <input v-model="exclusionForm.route_prefix" placeholder="/api/webhooks/mpesa" required />
+          <input v-model="exclusionForm.rule_id" placeholder="Rule ID (e.g. 942100)" required />
+          <button type="submit" class="btn-secondary">Add Exclusion</button>
+        </form>
+        <input v-model="exclusionForm.reason" placeholder="Reason for exclusion (audit required)" class="mt-sm" />
+        <ul class="site-list">
+          <li v-for="ex in exclusions" :key="ex.id" class="site-item">
+            <span><code>{{ ex.route_prefix }}</code> — Rule <code>{{ ex.rule_id }}</code> ({{ ex.reason }})</span>
+            <button class="btn-secondary" @click="removeExclusion(ex.id)">Remove</button>
+          </li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h2>Recent Security Events</h2>
+        <ul class="site-list">
+          <li v-for="ev in securityEvents" :key="ev.id" class="site-item">
+            <span>
+              <span class="badge" :class="ev.action">{{ ev.action }}</span>
+              <code>{{ ev.route }}</code> — Rule <code>{{ ev.rule_id }}</code> ({{ ev.reason_code }})
+            </span>
+            <span class="meta">{{ ev.correlation_id }}</span>
+          </li>
+        </ul>
       </div>
     </section>
   </main>
@@ -98,14 +137,67 @@ const lockdownResult = ref('');
 
 const authForm = ref({ tenant_name: '', email: '', password: '' });
 const originForm = ref({ upstream_url: '', rate_limit_rps: 50 });
+const wafForm = ref({ mode: 'monitor', crs_version: '4.10.0', max_inspect_body_bytes: 131072 });
+const exclusionForm = ref({ route_prefix: '/', rule_id: '', reason: '' });
+const exclusions = ref([]);
+const securityEvents = ref([]);
 
 const api = createApiClient({ getToken: () => token.value });
 
 async function loadSites() {
   if (!token.value) return;
   try {
-    const res = await api.listSites();
-    sites.value = res.sites || [];
+    const [siteRes, evRes] = await Promise.all([api.listSites(), api.listSecurityEvents()]);
+    sites.value = siteRes.sites || [];
+    securityEvents.value = evRes.events || [];
+  } catch (err) {
+    error.value = err.message;
+  }
+}
+
+async function selectSite(siteId) {
+  selectedSiteId.value = siteId;
+  error.value = '';
+  try {
+    const [waf, exRes] = await Promise.all([api.getWafPolicy(siteId), api.listWafExclusions(siteId)]);
+    wafForm.value = {
+      mode: waf.mode || 'monitor',
+      crs_version: waf.crs_version || '4.10.0',
+      max_inspect_body_bytes: waf.max_inspect_body_bytes || 131072
+    };
+    exclusions.value = exRes.exclusions || [];
+  } catch (err) {
+    error.value = err.message;
+  }
+}
+
+async function saveWaf() {
+  error.value = '';
+  try {
+    await api.upsertWafPolicy(selectedSiteId.value, wafForm.value);
+    lockdownResult.value = `WAF updated to ${wafForm.value.mode} mode.`;
+  } catch (err) {
+    error.value = err.message;
+  }
+}
+
+async function addExclusion() {
+  error.value = '';
+  try {
+    await api.addWafExclusion(selectedSiteId.value, exclusionForm.value);
+    exclusionForm.value = { route_prefix: '/', rule_id: '', reason: '' };
+    const exRes = await api.listWafExclusions(selectedSiteId.value);
+    exclusions.value = exRes.exclusions || [];
+  } catch (err) {
+    error.value = err.message;
+  }
+}
+
+async function removeExclusion(exclusionId) {
+  error.value = '';
+  try {
+    await api.deleteWafExclusion(selectedSiteId.value, exclusionId);
+    exclusions.value = exclusions.value.filter((x) => x.id !== exclusionId);
   } catch (err) {
     error.value = err.message;
   }
@@ -194,6 +286,10 @@ input, select { width: 100%; padding: 0.5rem; margin-top: 0.25rem; border: 1px s
 .site-item { display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 0; border-top: 1px solid #e2e8f0; }
 .badge { margin-left: 0.5rem; padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.75rem; background: #e2e8f0; }
 .badge.active { background: #dcfce7; color: #166534; }
+.badge.block { background: #fee2e2; color: #991b1b; }
+.badge.observe { background: #fef9c3; color: #854d0e; }
+.divider { border: none; border-top: 1px solid #e2e8f0; margin: 1.25rem 0; }
+.mt-sm { margin-top: 0.5rem; }
 .meta { font-size: 0.82rem; color: #475569; margin-top: 0.25rem; }
 .error { color: #b91c1c; font-size: 0.88rem; }
 </style>

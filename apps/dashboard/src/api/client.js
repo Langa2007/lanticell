@@ -30,6 +30,15 @@ export function createApiClient({ baseUrl = DEFAULT_BASE, fetchImpl = fetch, get
     upsertOrigin: (siteId, payload) =>
       request(`/api/v1/sites/${siteId}/origin`, { method: 'PUT', body: payload }),
     verifyLockdown: (siteId) => request(`/api/v1/sites/${siteId}/verify-lockdown`, { method: 'POST' }),
+    getWafPolicy: (siteId) => request(`/api/v1/sites/${siteId}/waf`),
+    upsertWafPolicy: (siteId, payload) =>
+      request(`/api/v1/sites/${siteId}/waf`, { method: 'PUT', body: payload }),
+    listWafExclusions: (siteId) => request(`/api/v1/sites/${siteId}/waf/exclusions`),
+    addWafExclusion: (siteId, payload) =>
+      request(`/api/v1/sites/${siteId}/waf/exclusions`, { method: 'POST', body: payload }),
+    deleteWafExclusion: (siteId, exclusionId) =>
+      request(`/api/v1/sites/${siteId}/waf/exclusions/${exclusionId}`, { method: 'DELETE' }),
+    listSecurityEvents: () => request('/api/v1/security-events'),
     listAuditLogs: () => request('/api/v1/audit-logs')
   };
 }

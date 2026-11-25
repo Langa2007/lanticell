@@ -138,3 +138,63 @@ func TestInvalidDomainAndOriginRejected(t *testing.T) {
 		t.Fatalf("expected 400 for domain injection attempt, got %d", badSite.Code)
 	}
 }
+
+func TestWAFPolicyExclusionsAndSecurityEvents(t *testing.T) {
+	srv := newTestServer()
+	h := srv.Handler()
+
+	reg := doJSON(t, h, http.MethodPost, "/api/v1/auth/register", "", map[string]string{
+		"tenant_name": "Kigali Fintech",
+		"email":       "sec@kigalifintech.rw",
+		"password":    "StrongPass123!",
+	})
+	var regResp struct{ Token string `json:"token"` }
+	_ = json.Unmarshal(reg.Body.Bytes(), &regResp)
+
+	siteRes := doJSON(t, h, http.MethodPost, "/api/v1/sites", regResp.Token, map[string]string{
+		"domain": "pay.kigalifintech.rw",
+	})
+	var site store.Site
+	_ = json.Unmarshal(siteRes.Body.Bytes(), &site)
+
+	// Enable block mode
+	wafRes := doJSON(t, h, http.MethodPut, "/api/v1/sites/"+site.ID+"/waf", regResp.Token, map[string]any{
+		"mode":                   "block",
+		"crs_version":            "4.10.0",
+		"max_inspect_body_bytes": 65536,
+	})
+	if wafRes.Code != http.StatusOK {
+		t.Fatalf("expected 200 updating WAF policy, got %d: %s", wafRes.Code, wafRes.Body.String())
+	}
+
+	// Add scoped exclusion
+	exRes := doJSON(t, h, http.MethodPost, "/api/v1/sites/"+site.ID+"/waf/exclusions", regResp.Token, map[string]any{
+		"route_prefix": "/api/webhooks/momo",
+		"rule_id":      "942100",
+		"reason":       "MoMo callback payload contains SQL-like key names",
+	})
+	if exRes.Code != http.StatusCreated {
+		t.Fatalf("expected 201 creating exclusion, got %d: %s", exRes.Code, exRes.Body.String())
+	}
+
+	// Agent records a security event
+	evRes := doJSON(t, h, http.MethodPost, "/api/v1/agent/events", "test-agent-token", map[string]any{
+		"tenant_id":      site.TenantID,
+		"site_id":        site.ID,
+		"correlation_id": "req-abc-123",
+		"route":          "/login",
+		"rule_id":        "942100",
+		"crs_version":    "4.10.0",
+		"action":         "block",
+		"confidence":     0.95,
+		"reason_code":    "sqli_detected",
+	})
+	if evRes.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 for agent event, got %d", evRes.Code)
+	}
+
+	listEv := doJSON(t, h, http.MethodGet, "/api/v1/security-events", regResp.Token, nil)
+	if listEv.Code != http.StatusOK || !strings.Contains(listEv.Body.String(), "req-abc-123") {
+		t.Fatalf("expected security event in tenant list, got %d: %s", listEv.Code, listEv.Body.String())
+	}
+}

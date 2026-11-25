@@ -22,7 +22,16 @@ func RenderNginxConfig(bundle validator.ConfigBundle) string {
 		b.WriteString(fmt.Sprintf("    server_name %s;\n\n", site.Domain))
 		b.WriteString(fmt.Sprintf("    client_max_body_size %d;\n", site.MaxBodyBytes))
 		b.WriteString("    limit_conn lanticell_conn 100;\n")
-		b.WriteString("    limit_req zone=lanticell_req burst=100 nodelay;\n\n")
+		b.WriteString("    limit_req zone=lanticell_req burst=100 nodelay;\n")
+		wafMode := site.WAFMode
+		if wafMode == "" {
+			wafMode = "monitor"
+		}
+		b.WriteString(fmt.Sprintf("    # WAF mode: %s (CRS %s)\n", wafMode, site.CRSVersion))
+		for _, ex := range site.WAFExclusions {
+			b.WriteString(fmt.Sprintf("    # WAF exclusion: route=%s rule=%s\n", ex.RoutePrefix, ex.RuleID))
+		}
+		b.WriteString("\n")
 		b.WriteString("    location / {\n")
 		b.WriteString(fmt.Sprintf("        proxy_pass %s;\n", site.UpstreamURL))
 		b.WriteString("        proxy_http_version 1.1;\n")

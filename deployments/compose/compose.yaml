@@ -78,6 +78,16 @@ services:
     ports:
       - "9000:9000"
 
+  botd:
+    build:
+      context: ../..
+      dockerfile: apps/bot-engine/Dockerfile
+    environment:
+      BOTD_PORT: "8090"
+      BOT_CHALLENGE_SECRET: ${BOT_CHALLENGE_SECRET:-dev-bot-challenge-secret-32bytes}
+    ports:
+      - "8090:8090"
+
 volumes:
   pgdata:
   gateway_conf:

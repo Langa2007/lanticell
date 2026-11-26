@@ -55,6 +55,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/sites/{id}/verify-lockdown", s.requireAuth(http.HandlerFunc(s.handleVerifyLockdown)))
 	mux.Handle("GET /api/v1/sites/{id}/waf", s.requireAuth(http.HandlerFunc(s.handleGetWAFPolicy)))
 	mux.Handle("PUT /api/v1/sites/{id}/waf", s.requireAuth(s.requireWriteRole(http.HandlerFunc(s.handleUpsertWAFPolicy))))
+	mux.Handle("GET /api/v1/sites/{id}/bot-policy", s.requireAuth(http.HandlerFunc(s.handleGetBotPolicy)))
+	mux.Handle("PUT /api/v1/sites/{id}/bot-policy", s.requireAuth(s.requireWriteRole(http.HandlerFunc(s.handleUpsertBotPolicy))))
 	mux.Handle("GET /api/v1/sites/{id}/waf/exclusions", s.requireAuth(http.HandlerFunc(s.handleListWAFExclusions)))
 	mux.Handle("POST /api/v1/sites/{id}/waf/exclusions", s.requireAuth(s.requireWriteRole(http.HandlerFunc(s.handleAddWAFExclusion))))
 	mux.Handle("DELETE /api/v1/sites/{id}/waf/exclusions/{exclusionId}", s.requireAuth(s.requireWriteRole(http.HandlerFunc(s.handleDeleteWAFExclusion))))
@@ -537,6 +539,59 @@ func (s *Server) handleAgentEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Store.AppendSecurityEvent(ev)
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
+}
+
+func (s *Server) handleGetBotPolicy(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	siteID := r.PathValue("id")
+	if _, err := s.Store.GetSite(claims.TenantID, siteID); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, s.Store.GetBotPolicy(claims.TenantID, siteID))
+}
+
+func (s *Server) handleUpsertBotPolicy(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	siteID := r.PathValue("id")
+	if _, err := s.Store.GetSite(claims.TenantID, siteID); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	var req struct {
+		Mode                string   `json:"mode"`
+		ChallengeDifficulty int      `json:"challenge_difficulty"`
+		AllowlistedBots     []string `json:"allowlisted_bots"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if req.Mode != "off" && req.Mode != "observe" && req.Mode != "enforce" {
+		writeError(w, http.StatusBadRequest, "bot mode must be off, observe, or enforce")
+		return
+	}
+	if req.ChallengeDifficulty == 0 {
+		req.ChallengeDifficulty = 3
+	}
+	if req.ChallengeDifficulty < 1 || req.ChallengeDifficulty > 6 {
+		writeError(w, http.StatusBadRequest, "challenge_difficulty must be between 1 and 6")
+		return
+	}
+	pol := store.BotPolicy{
+		SiteID:              siteID,
+		TenantID:            claims.TenantID,
+		Mode:                req.Mode,
+		ChallengeDifficulty: req.ChallengeDifficulty,
+		AllowlistedBots:     req.AllowlistedBots,
+		UpdatedAt:           time.Now().UTC(),
+	}
+	if err := s.Store.UpsertBotPolicy(pol); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	s.recordAudit(claims.TenantID, claims.UserID, "bot.policy_update", "site", siteID, map[string]string{"mode": pol.Mode})
+	writeJSON(w, http.StatusOK, pol)
 }
 
 func (s *Server) requireAuth(next http.Handler) http.Handler {

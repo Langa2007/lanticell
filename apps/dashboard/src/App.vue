@@ -91,6 +91,20 @@
           <button type="submit" class="btn-primary">Update WAF</button>
         </form>
 
+        <hr class="divider" />
+        <h3>Bot Detection &amp; Inbuilt Challenge</h3>
+        <form @submit.prevent="saveBotPolicy" class="row-form">
+          <select v-model="botForm.mode">
+            <option value="observe">Observe (Default)</option>
+            <option value="enforce">Enforce (Rate-limit / PoW Challenge / Block)</option>
+            <option value="off">Off</option>
+          </select>
+          <input v-model.number="botForm.challenge_difficulty" type="number" min="1" max="6" title="PoW Difficulty (1-6)" />
+          <button type="submit" class="btn-primary">Update Bot Policy</button>
+        </form>
+        <input v-model="allowlistedBotsInput" placeholder="Allowlisted bots (comma-separated, e.g. UptimeRobot, Googlebot)" class="mt-sm" />
+
+        <hr class="divider" />
         <h3>Scoped Rule Exclusions</h3>
         <form @submit.prevent="addExclusion" class="row-form">
           <input v-model="exclusionForm.route_prefix" placeholder="/api/webhooks/mpesa" required />
@@ -138,6 +152,8 @@ const lockdownResult = ref('');
 const authForm = ref({ tenant_name: '', email: '', password: '' });
 const originForm = ref({ upstream_url: '', rate_limit_rps: 50 });
 const wafForm = ref({ mode: 'monitor', crs_version: '4.10.0', max_inspect_body_bytes: 131072 });
+const botForm = ref({ mode: 'observe', challenge_difficulty: 3, allowlisted_bots: [] });
+const allowlistedBotsInput = ref('');
 const exclusionForm = ref({ route_prefix: '/', rule_id: '', reason: '' });
 const exclusions = ref([]);
 const securityEvents = ref([]);
@@ -159,13 +175,41 @@ async function selectSite(siteId) {
   selectedSiteId.value = siteId;
   error.value = '';
   try {
-    const [waf, exRes] = await Promise.all([api.getWafPolicy(siteId), api.listWafExclusions(siteId)]);
+    const [waf, bot, exRes] = await Promise.all([
+      api.getWafPolicy(siteId),
+      api.getBotPolicy(siteId),
+      api.listWafExclusions(siteId)
+    ]);
     wafForm.value = {
       mode: waf.mode || 'monitor',
       crs_version: waf.crs_version || '4.10.0',
       max_inspect_body_bytes: waf.max_inspect_body_bytes || 131072
     };
+    botForm.value = {
+      mode: bot.mode || 'observe',
+      challenge_difficulty: bot.challenge_difficulty || 3,
+      allowlisted_bots: bot.allowlisted_bots || []
+    };
+    allowlistedBotsInput.value = (bot.allowlisted_bots || []).join(', ');
     exclusions.value = exRes.exclusions || [];
+  } catch (err) {
+    error.value = err.message;
+  }
+}
+
+async function saveBotPolicy() {
+  error.value = '';
+  try {
+    const allowlisted = allowlistedBotsInput.value
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    await api.upsertBotPolicy(selectedSiteId.value, {
+      mode: botForm.value.mode,
+      challenge_difficulty: botForm.value.challenge_difficulty,
+      allowlisted_bots: allowlisted
+    });
+    lockdownResult.value = `Bot policy updated to ${botForm.value.mode} mode.`;
   } catch (err) {
     error.value = err.message;
   }

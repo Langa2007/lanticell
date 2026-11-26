@@ -85,6 +85,15 @@ type WAFPolicy struct {
 	UpdatedAt           time.Time `json:"updated_at"`
 }
 
+type BotPolicy struct {
+	SiteID              string    `json:"site_id"`
+	TenantID            string    `json:"tenant_id"`
+	Mode                string    `json:"mode"` // off | observe | enforce
+	ChallengeDifficulty int       `json:"challenge_difficulty"`
+	AllowlistedBots     []string  `json:"allowlisted_bots,omitempty"`
+	UpdatedAt           time.Time `json:"updated_at"`
+}
+
 type WAFExclusion struct {
 	ID          string     `json:"id"`
 	TenantID    string     `json:"tenant_id"`
@@ -121,6 +130,7 @@ type Store struct {
 	sites          map[string]Site
 	origins        map[string]Origin // key: siteID
 	wafPolicies    map[string]WAFPolicy // key: siteID
+	botPolicies    map[string]BotPolicy // key: siteID
 	wafExclusions  map[string][]WAFExclusion // key: siteID
 	securityEvents []SecurityEvent
 	auditLogs      []AuditLog
@@ -136,6 +146,7 @@ func NewStore() *Store {
 		sites:         make(map[string]Site),
 		origins:       make(map[string]Origin),
 		wafPolicies:   make(map[string]WAFPolicy),
+		botPolicies:   make(map[string]BotPolicy),
 		wafExclusions: make(map[string][]WAFExclusion),
 		gateways:      make(map[string]GatewayNode),
 		version:       1,
@@ -403,4 +414,33 @@ func (s *Store) ListSecurityEvents(tenantID string) []SecurityEvent {
 		}
 	}
 	return out
+}
+
+func (s *Store) UpsertBotPolicy(p BotPolicy) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	site, ok := s.sites[p.SiteID]
+	if !ok {
+		return ErrNotFound
+	}
+	if site.TenantID != p.TenantID {
+		return ErrForbidden
+	}
+	s.botPolicies[p.SiteID] = p
+	s.version++
+	return nil
+}
+
+func (s *Store) GetBotPolicy(tenantID, siteID string) BotPolicy {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if p, ok := s.botPolicies[siteID]; ok && p.TenantID == tenantID {
+		return p
+	}
+	return BotPolicy{
+		SiteID:              siteID,
+		TenantID:            tenantID,
+		Mode:                "observe",
+		ChallengeDifficulty: 3,
+	}
 }

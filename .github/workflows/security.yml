@@ -31,8 +31,10 @@ jobs:
       - name: Scan Go modules
         run: |
           (cd packages/event-schema && govulncheck ./...)
+          (cd packages/detector-sdk && govulncheck ./...)
           (cd apps/control-api && govulncheck ./...)
           (cd apps/gateway-agent && govulncheck ./...)
+          (cd apps/bot-engine && govulncheck ./...)
 
   trivy:
     name: Trivy Filesystem & Config Scan

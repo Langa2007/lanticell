@@ -197,4 +197,14 @@ func TestWAFPolicyExclusionsAndSecurityEvents(t *testing.T) {
 	if listEv.Code != http.StatusOK || !strings.Contains(listEv.Body.String(), "req-abc-123") {
 		t.Fatalf("expected security event in tenant list, got %d: %s", listEv.Code, listEv.Body.String())
 	}
+
+	// Update bot policy
+	botRes := doJSON(t, h, http.MethodPut, "/api/v1/sites/"+site.ID+"/bot-policy", regResp.Token, map[string]any{
+		"mode":                 "enforce",
+		"challenge_difficulty": 3,
+		"allowlisted_bots":     []string{"UptimeRobot"},
+	})
+	if botRes.Code != http.StatusOK || !strings.Contains(botRes.Body.String(), "enforce") {
+		t.Fatalf("expected 200 updating bot policy, got %d: %s", botRes.Code, botRes.Body.String())
+	}
 }

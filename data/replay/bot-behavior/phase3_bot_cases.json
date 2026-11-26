@@ -1,0 +1,32 @@
+[
+  {
+    "name": "opera_mini_mobile_user_cgnat",
+    "route": "/products",
+    "route_type": "public",
+    "method": "GET",
+    "user_agent": "Opera/9.80 (Android; Opera Mini/72.0.2254/191.303; U; en) Presto/2.12.423 Version/12.16",
+    "headers": {"X-OperaMini-Features": "advanced"},
+    "is_browser_route": true,
+    "expected_action": "allow"
+  },
+  {
+    "name": "mpesa_webhook_callback",
+    "route": "/api/webhooks/mpesa",
+    "route_type": "webhook",
+    "method": "POST",
+    "user_agent": "Daraja-Callback/1.0",
+    "headers": {},
+    "is_browser_route": false,
+    "expected_action": "allow"
+  },
+  {
+    "name": "scripted_scraper_browser_route",
+    "route": "/catalog",
+    "route_type": "search",
+    "method": "GET",
+    "user_agent": "python-requests/2.32.3",
+    "headers": {},
+    "is_browser_route": true,
+    "expected_action": "rate_limit"
+  }
+]

@@ -33,6 +33,9 @@ export function createApiClient({ baseUrl = DEFAULT_BASE, fetchImpl = fetch, get
     getWafPolicy: (siteId) => request(`/api/v1/sites/${siteId}/waf`),
     upsertWafPolicy: (siteId, payload) =>
       request(`/api/v1/sites/${siteId}/waf`, { method: 'PUT', body: payload }),
+    getBotPolicy: (siteId) => request(`/api/v1/sites/${siteId}/bot-policy`),
+    upsertBotPolicy: (siteId, payload) =>
+      request(`/api/v1/sites/${siteId}/bot-policy`, { method: 'PUT', body: payload }),
     listWafExclusions: (siteId) => request(`/api/v1/sites/${siteId}/waf/exclusions`),
     addWafExclusion: (siteId, payload) =>
       request(`/api/v1/sites/${siteId}/waf/exclusions`, { method: 'POST', body: payload }),

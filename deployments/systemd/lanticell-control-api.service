@@ -1,0 +1,21 @@
+[Unit]
+Description=Lanticell Control Plane API
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lanticell
+Group=lanticell
+EnvironmentFile=/etc/lanticell/control-api.env
+ExecStart=/usr/local/bin/control-api
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

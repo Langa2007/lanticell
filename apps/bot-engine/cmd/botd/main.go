@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/lanticell/bot-engine/challenge"
@@ -34,10 +36,16 @@ func main() {
 		rep,
 	)
 	chal := challenge.NewManager(secret, 3, 30*time.Minute)
+	var evalCount, challengeCount atomic.Int64
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		fmt.Fprintf(w, "# TYPE lanticell_botd_evaluations_total counter\nlanticell_botd_evaluations_total %d\n", evalCount.Load())
+		fmt.Fprintf(w, "# TYPE lanticell_botd_challenges_issued_total counter\nlanticell_botd_challenges_issued_total %d\n", challengeCount.Load())
 	})
 
 	mux.HandleFunc("POST /evaluate", func(w http.ResponseWriter, r *http.Request) {
@@ -56,8 +64,10 @@ func main() {
 			req.Policy.Mode = "observe"
 		}
 		dec := agg.Evaluate(r.Context(), req.Features, req.Policy)
+		evalCount.Add(1)
 		resp := map[string]any{"decision": dec}
 		if dec.Action == "challenge" {
+			challengeCount.Add(1)
 			resp["challenge_token"] = chal.CreateChallenge(req.Features.ClientPrefix, req.Features.UserAgent, req.Features.Timestamp)
 			resp["difficulty"] = chal.Difficulty
 		}

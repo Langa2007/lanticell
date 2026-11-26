@@ -117,6 +117,33 @@ type APIInventoryEntry struct {
 	LastSeenAt     time.Time `json:"last_seen_at"`
 }
 
+type TenantPlan struct {
+	TenantID            string    `json:"tenant_id"`
+	PlanTier            string    `json:"plan_tier"` // pilot | growth | enterprise
+	MonthlyRequestLimit int64     `json:"monthly_request_limit"`
+	MaxSites            int       `json:"max_sites"`
+	UpdatedAt           time.Time `json:"updated_at"`
+}
+
+type UsageRecord struct {
+	TenantID          string    `json:"tenant_id"`
+	PeriodMonth       string    `json:"period_month"`
+	InspectedRequests int64     `json:"inspected_requests"`
+	BlockedRequests   int64     `json:"blocked_requests"`
+	BytesInspected    int64     `json:"bytes_inspected"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+type StatusIncident struct {
+	ID        string    `json:"id"`
+	Title     string    `json:"title"`
+	Severity  string    `json:"severity"` // minor | major | critical
+	Status    string    `json:"status"`   // investigating | identified | monitoring | resolved
+	Summary   string    `json:"summary"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 type WAFExclusion struct {
 	ID          string     `json:"id"`
 	TenantID    string     `json:"tenant_id"`
@@ -158,6 +185,9 @@ type Store struct {
 	routePolicies  map[string][]apipolicy.RoutePolicy // key: siteID
 	apiSchemas     map[string][]APISchemaVersion      // key: siteID
 	apiInventory   map[string][]APIInventoryEntry     // key: siteID
+	tenantPlans    map[string]TenantPlan              // key: tenantID
+	usageRecords   map[string]UsageRecord             // key: tenantID + ":" + periodMonth
+	incidents      []StatusIncident
 	securityEvents []SecurityEvent
 	auditLogs      []AuditLog
 	gateways       map[string]GatewayNode
@@ -177,6 +207,8 @@ func NewStore() *Store {
 		routePolicies: make(map[string][]apipolicy.RoutePolicy),
 		apiSchemas:    make(map[string][]APISchemaVersion),
 		apiInventory:  make(map[string][]APIInventoryEntry),
+		tenantPlans:   make(map[string]TenantPlan),
+		usageRecords:  make(map[string]UsageRecord),
 		gateways:      make(map[string]GatewayNode),
 		version:       1,
 	}
@@ -635,4 +667,74 @@ func (s *Store) ListAPIInventory(tenantID, siteID string) ([]APIInventoryEntry, 
 	out := make([]APIInventoryEntry, len(list))
 	copy(out, list)
 	return out, nil
+}
+
+func (s *Store) UpsertTenantPlan(plan TenantPlan) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tenantPlans[plan.TenantID] = plan
+}
+
+func (s *Store) GetTenantPlan(tenantID string) TenantPlan {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if p, ok := s.tenantPlans[tenantID]; ok {
+		return p
+	}
+	return TenantPlan{
+		TenantID:            tenantID,
+		PlanTier:            "pilot",
+		MonthlyRequestLimit: 5000000,
+		MaxSites:            3,
+	}
+}
+
+func (s *Store) RecordUsage(tenantID, periodMonth string, inspected, blocked, bytes int64, now time.Time) UsageRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := tenantID + ":" + periodMonth
+	rec := s.usageRecords[key]
+	rec.TenantID = tenantID
+	rec.PeriodMonth = periodMonth
+	rec.InspectedRequests += inspected
+	rec.BlockedRequests += blocked
+	rec.BytesInspected += bytes
+	rec.UpdatedAt = now
+	s.usageRecords[key] = rec
+	return rec
+}
+
+func (s *Store) GetUsage(tenantID, periodMonth string) UsageRecord {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if rec, ok := s.usageRecords[tenantID+":"+periodMonth]; ok {
+		return rec
+	}
+	return UsageRecord{TenantID: tenantID, PeriodMonth: periodMonth}
+}
+
+func (s *Store) AddIncident(inc StatusIncident) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.incidents = append(s.incidents, inc)
+}
+
+func (s *Store) StatusSummary() (int, int, []StatusIncident) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	healthy := 0
+	for _, g := range s.gateways {
+		if g.Healthy {
+			healthy++
+		}
+	}
+	out := make([]StatusIncident, len(s.incidents))
+	copy(out, s.incidents)
+	return len(s.gateways), healthy, out
+}
+
+func (s *Store) Counts() (sites int, gateways int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.sites), len(s.gateways)
 }

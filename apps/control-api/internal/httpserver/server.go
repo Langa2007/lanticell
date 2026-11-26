@@ -5,10 +5,12 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/lanticell/control-api/internal/apipolicy"
@@ -29,6 +31,8 @@ type Server struct {
 	AgentToken    string
 	LookupTXT     func(ctx context.Context, name string) ([]string, error)
 	HTTPClient    *http.Client
+	reqCounter    atomic.Int64
+	errCounter    atomic.Int64
 }
 
 func NewServer(st *store.Store, jwtSecret, encKey []byte, agentToken string) *Server {
@@ -47,6 +51,8 @@ func NewServer(st *store.Store, jwtSecret, encKey []byte, agentToken string) *Se
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
+	mux.HandleFunc("GET /status", s.handlePublicStatus)
 	mux.HandleFunc("POST /api/v1/auth/register", s.handleRegister)
 	mux.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
 
@@ -67,6 +73,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/sites/{id}/api-schemas/{version}/rollback", s.requireAuth(s.requireWriteRole(http.HandlerFunc(s.handleRollbackAPISchema))))
 	mux.Handle("GET /api/v1/sites/{id}/api-inventory", s.requireAuth(http.HandlerFunc(s.handleListAPIInventory)))
 	mux.Handle("POST /api/v1/hooks/auth-signal", s.requireAuth(http.HandlerFunc(s.handleAuthSignalHook)))
+	mux.Handle("GET /api/v1/billing/usage", s.requireAuth(http.HandlerFunc(s.handleGetUsage)))
+	mux.Handle("PUT /api/v1/billing/plan", s.requireAuth(s.requireWriteRole(http.HandlerFunc(s.handleUpdatePlan))))
+	mux.Handle("POST /api/v1/operator/incidents", s.requireAuth(s.requireWriteRole(http.HandlerFunc(s.handleCreateIncident))))
 	mux.Handle("GET /api/v1/sites/{id}/waf/exclusions", s.requireAuth(http.HandlerFunc(s.handleListWAFExclusions)))
 	mux.Handle("POST /api/v1/sites/{id}/waf/exclusions", s.requireAuth(s.requireWriteRole(http.HandlerFunc(s.handleAddWAFExclusion))))
 	mux.Handle("DELETE /api/v1/sites/{id}/waf/exclusions/{exclusionId}", s.requireAuth(s.requireWriteRole(http.HandlerFunc(s.handleDeleteWAFExclusion))))
@@ -77,8 +86,30 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/agent/health", s.requireAgentAuth(http.HandlerFunc(s.handleAgentHealth)))
 	mux.Handle("POST /api/v1/agent/events", s.requireAgentAuth(http.HandlerFunc(s.handleAgentEvents)))
 	mux.Handle("POST /api/v1/agent/inventory", s.requireAgentAuth(http.HandlerFunc(s.handleAgentInventory)))
+	mux.Handle("POST /api/v1/agent/usage", s.requireAgentAuth(http.HandlerFunc(s.handleAgentUsage)))
 
-	return withCORS(mux)
+	return s.withMetrics(withCORS(mux))
+}
+
+func (s *Server) withMetrics(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.reqCounter.Add(1)
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		if rec.status >= 500 {
+			s.errCounter.Add(1)
+		}
+	})
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
 }
 
 func withCORS(next http.Handler) http.Handler {
@@ -552,6 +583,139 @@ func (s *Server) handleAgentEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 }
 
+func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+	sites, gateways := s.Store.Counts()
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	fmt.Fprintf(w, "# TYPE lanticell_http_requests_total counter\nlanticell_http_requests_total %d\n", s.reqCounter.Load())
+	fmt.Fprintf(w, "# TYPE lanticell_http_errors_total counter\nlanticell_http_errors_total %d\n", s.errCounter.Load())
+	fmt.Fprintf(w, "# TYPE lanticell_active_sites gauge\nlanticell_active_sites %d\n", sites)
+	fmt.Fprintf(w, "# TYPE lanticell_gateway_nodes gauge\nlanticell_gateway_nodes %d\n", gateways)
+}
+
+func (s *Server) handlePublicStatus(w http.ResponseWriter, _ *http.Request) {
+	total, healthy, incidents := s.Store.StatusSummary()
+	overall := "operational"
+	for _, inc := range incidents {
+		if inc.Status != "resolved" && inc.Severity == "critical" {
+			overall = "major_outage"
+			break
+		}
+		if inc.Status != "resolved" {
+			overall = "degraded"
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":           overall,
+		"gateways_total":   total,
+		"gateways_healthy": healthy,
+		"incidents":        incidents,
+	})
+}
+
+func (s *Server) handleCreateIncident(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Title    string `json:"title"`
+		Severity string `json:"severity"`
+		Status   string `json:"status"`
+		Summary  string `json:"summary"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if strings.TrimSpace(req.Title) == "" || (req.Severity != "minor" && req.Severity != "major" && req.Severity != "critical") {
+		writeError(w, http.StatusBadRequest, "valid title and severity (minor|major|critical) required")
+		return
+	}
+	if req.Status == "" {
+		req.Status = "investigating"
+	}
+	id, _ := crypto.RandomHex(12)
+	now := time.Now().UTC()
+	inc := store.StatusIncident{
+		ID:        id,
+		Title:     req.Title,
+		Severity:  req.Severity,
+		Status:    req.Status,
+		Summary:   req.Summary,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	s.Store.AddIncident(inc)
+	writeJSON(w, http.StatusCreated, inc)
+}
+
+func (s *Server) handleGetUsage(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	month := r.URL.Query().Get("month")
+	if month == "" {
+		month = time.Now().UTC().Format("2006-01")
+	}
+	plan := s.Store.GetTenantPlan(claims.TenantID)
+	usage := s.Store.GetUsage(claims.TenantID, month)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"plan":  plan,
+		"usage": usage,
+	})
+}
+
+func (s *Server) handleUpdatePlan(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	var req struct {
+		PlanTier string `json:"plan_tier"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8*1024)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	var limit int64
+	var maxSites int
+	switch req.PlanTier {
+	case "pilot":
+		limit, maxSites = 5000000, 3
+	case "growth":
+		limit, maxSites = 50000000, 20
+	case "enterprise":
+		limit, maxSites = 500000000, 100
+	default:
+		writeError(w, http.StatusBadRequest, "plan_tier must be pilot, growth, or enterprise")
+		return
+	}
+	plan := store.TenantPlan{
+		TenantID:            claims.TenantID,
+		PlanTier:            req.PlanTier,
+		MonthlyRequestLimit: limit,
+		MaxSites:            maxSites,
+		UpdatedAt:           time.Now().UTC(),
+	}
+	s.Store.UpsertTenantPlan(plan)
+	s.recordAudit(claims.TenantID, claims.UserID, "billing.plan_update", "tenant", claims.TenantID, map[string]string{"plan_tier": req.PlanTier})
+	writeJSON(w, http.StatusOK, plan)
+}
+
+func (s *Server) handleAgentUsage(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		TenantID          string `json:"tenant_id"`
+		PeriodMonth       string `json:"period_month"`
+		InspectedRequests int64  `json:"inspected_requests"`
+		BlockedRequests   int64  `json:"blocked_requests"`
+		BytesInspected    int64  `json:"bytes_inspected"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if req.TenantID == "" {
+		writeError(w, http.StatusBadRequest, "tenant_id is required")
+		return
+	}
+	if req.PeriodMonth == "" {
+		req.PeriodMonth = time.Now().UTC().Format("2006-01")
+	}
+	rec := s.Store.RecordUsage(req.TenantID, req.PeriodMonth, req.InspectedRequests, req.BlockedRequests, req.BytesInspected, time.Now().UTC())
+	writeJSON(w, http.StatusAccepted, rec)
+}
+
 func (s *Server) handleGetBotPolicy(w http.ResponseWriter, r *http.Request) {
 	claims := claimsFromContext(r.Context())
 	siteID := r.PathValue("id")
@@ -797,6 +961,139 @@ func (s *Server) handleAuthSignalHook(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:     time.Now().UTC(),
 	})
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+	sites, gateways := s.Store.Counts()
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	fmt.Fprintf(w, "# TYPE lanticell_http_requests_total counter\nlanticell_http_requests_total %d\n", s.reqCounter.Load())
+	fmt.Fprintf(w, "# TYPE lanticell_http_errors_total counter\nlanticell_http_errors_total %d\n", s.errCounter.Load())
+	fmt.Fprintf(w, "# TYPE lanticell_active_sites gauge\nlanticell_active_sites %d\n", sites)
+	fmt.Fprintf(w, "# TYPE lanticell_gateway_nodes gauge\nlanticell_gateway_nodes %d\n", gateways)
+}
+
+func (s *Server) handlePublicStatus(w http.ResponseWriter, _ *http.Request) {
+	total, healthy, incidents := s.Store.StatusSummary()
+	overall := "operational"
+	for _, inc := range incidents {
+		if inc.Status != "resolved" && inc.Severity == "critical" {
+			overall = "major_outage"
+			break
+		}
+		if inc.Status != "resolved" {
+			overall = "degraded"
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":           overall,
+		"gateways_total":   total,
+		"gateways_healthy": healthy,
+		"incidents":        incidents,
+	})
+}
+
+func (s *Server) handleCreateIncident(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Title    string `json:"title"`
+		Severity string `json:"severity"`
+		Status   string `json:"status"`
+		Summary  string `json:"summary"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if strings.TrimSpace(req.Title) == "" || (req.Severity != "minor" && req.Severity != "major" && req.Severity != "critical") {
+		writeError(w, http.StatusBadRequest, "valid title and severity (minor|major|critical) required")
+		return
+	}
+	if req.Status == "" {
+		req.Status = "investigating"
+	}
+	id, _ := crypto.RandomHex(12)
+	now := time.Now().UTC()
+	inc := store.StatusIncident{
+		ID:        id,
+		Title:     req.Title,
+		Severity:  req.Severity,
+		Status:    req.Status,
+		Summary:   req.Summary,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	s.Store.AddIncident(inc)
+	writeJSON(w, http.StatusCreated, inc)
+}
+
+func (s *Server) handleGetUsage(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	month := r.URL.Query().Get("month")
+	if month == "" {
+		month = time.Now().UTC().Format("2006-01")
+	}
+	plan := s.Store.GetTenantPlan(claims.TenantID)
+	usage := s.Store.GetUsage(claims.TenantID, month)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"plan":  plan,
+		"usage": usage,
+	})
+}
+
+func (s *Server) handleUpdatePlan(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	var req struct {
+		PlanTier string `json:"plan_tier"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8*1024)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	var limit int64
+	var maxSites int
+	switch req.PlanTier {
+	case "pilot":
+		limit, maxSites = 5000000, 3
+	case "growth":
+		limit, maxSites = 50000000, 20
+	case "enterprise":
+		limit, maxSites = 500000000, 100
+	default:
+		writeError(w, http.StatusBadRequest, "plan_tier must be pilot, growth, or enterprise")
+		return
+	}
+	plan := store.TenantPlan{
+		TenantID:            claims.TenantID,
+		PlanTier:            req.PlanTier,
+		MonthlyRequestLimit: limit,
+		MaxSites:            maxSites,
+		UpdatedAt:           time.Now().UTC(),
+	}
+	s.Store.UpsertTenantPlan(plan)
+	s.recordAudit(claims.TenantID, claims.UserID, "billing.plan_update", "tenant", claims.TenantID, map[string]string{"plan_tier": req.PlanTier})
+	writeJSON(w, http.StatusOK, plan)
+}
+
+func (s *Server) handleAgentUsage(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		TenantID          string `json:"tenant_id"`
+		PeriodMonth       string `json:"period_month"`
+		InspectedRequests int64  `json:"inspected_requests"`
+		BlockedRequests   int64  `json:"blocked_requests"`
+		BytesInspected    int64  `json:"bytes_inspected"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if req.TenantID == "" {
+		writeError(w, http.StatusBadRequest, "tenant_id is required")
+		return
+	}
+	if req.PeriodMonth == "" {
+		req.PeriodMonth = time.Now().UTC().Format("2006-01")
+	}
+	rec := s.Store.RecordUsage(req.TenantID, req.PeriodMonth, req.InspectedRequests, req.BlockedRequests, req.BytesInspected, time.Now().UTC())
+	writeJSON(w, http.StatusAccepted, rec)
 }
 
 func (s *Server) requireAuth(next http.Handler) http.Handler {

@@ -1,0 +1,28 @@
+groups:
+  - name: lanticell_slo_alerts
+    rules:
+      - alert: ControlAPIDown
+        expr: up{job="lanticell-control-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Lanticell control-api is down"
+          description: "Data-plane gateways retain last-known-good config, but dashboard and config publishing are unavailable."
+
+      - alert: BotdDown
+        expr: up{job="lanticell-botd"} == 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Lanticell botd is down"
+          description: "Gateways should fail open to observe while keeping NGINX rate limits and Coraza WAF active."
+
+      - alert: HighAPIErrorRate
+        expr: rate(lanticell_http_errors_total[5m]) / clamp_min(rate(lanticell_http_requests_total[5m]), 1) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High 5xx error rate on control-api (>5%)"

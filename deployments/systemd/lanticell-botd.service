@@ -1,0 +1,21 @@
+[Unit]
+Description=Lanticell Bot Detection Engine (botd)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lanticell
+Group=lanticell
+EnvironmentFile=/etc/lanticell/botd.env
+ExecStart=/usr/local/bin/botd
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -255,3 +255,61 @@ func TestWAFPolicyExclusionsAndSecurityEvents(t *testing.T) {
 		t.Fatalf("expected 200 rolling back schema to v1, got %d: %s", rb.Code, rb.Body.String())
 	}
 }
+
+func TestBillingUsageStatusAndMetrics(t *testing.T) {
+	srv := newTestServer()
+	h := srv.Handler()
+
+	reg := doJSON(t, h, http.MethodPost, "/api/v1/auth/register", "", map[string]string{
+		"tenant_name": "Accra Commerce",
+		"email":       "ops@accracommerce.gh",
+		"password":    "StrongPass123!",
+	})
+	var regResp struct {
+		Token  string `json:"token"`
+		Tenant struct {
+			ID string `json:"id"`
+		} `json:"tenant"`
+	}
+	_ = json.Unmarshal(reg.Body.Bytes(), &regResp)
+
+	// Upgrade plan & record agent usage
+	planRes := doJSON(t, h, http.MethodPut, "/api/v1/billing/plan", regResp.Token, map[string]string{"plan_tier": "growth"})
+	if planRes.Code != http.StatusOK || !strings.Contains(planRes.Body.String(), "growth") {
+		t.Fatalf("expected 200 updating plan, got %d: %s", planRes.Code, planRes.Body.String())
+	}
+	usagePost := doJSON(t, h, http.MethodPost, "/api/v1/agent/usage", "test-agent-token", map[string]any{
+		"tenant_id":          regResp.Tenant.ID,
+		"inspected_requests": 1200,
+		"blocked_requests":   45,
+		"bytes_inspected":    980000,
+	})
+	if usagePost.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 recording usage, got %d", usagePost.Code)
+	}
+	usageGet := doJSON(t, h, http.MethodGet, "/api/v1/billing/usage", regResp.Token, nil)
+	if usageGet.Code != http.StatusOK || !strings.Contains(usageGet.Body.String(), "1200") {
+		t.Fatalf("expected usage count 1200, got %d: %s", usageGet.Code, usageGet.Body.String())
+	}
+
+	// Incident & public status page
+	incRes := doJSON(t, h, http.MethodPost, "/api/v1/operator/incidents", regResp.Token, map[string]string{
+		"title":    "Nairobi PoP maintenance",
+		"severity": "minor",
+		"status":   "monitoring",
+		"summary":  "Traffic shifted to secondary zone.",
+	})
+	if incRes.Code != http.StatusCreated {
+		t.Fatalf("expected 201 creating incident, got %d", incRes.Code)
+	}
+	statusRes := doJSON(t, h, http.MethodGet, "/status", "", nil)
+	if statusRes.Code != http.StatusOK || !strings.Contains(statusRes.Body.String(), "degraded") {
+		t.Fatalf("expected degraded public status, got %d: %s", statusRes.Code, statusRes.Body.String())
+	}
+
+	// Prometheus metrics
+	metricsRes := doJSON(t, h, http.MethodGet, "/metrics", "", nil)
+	if metricsRes.Code != http.StatusOK || !strings.Contains(metricsRes.Body.String(), "lanticell_http_requests_total") {
+		t.Fatalf("expected Prometheus metrics output, got %d", metricsRes.Code)
+	}
+}

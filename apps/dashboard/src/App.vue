@@ -105,6 +105,44 @@
         <input v-model="allowlistedBotsInput" placeholder="Allowlisted bots (comma-separated, e.g. UptimeRobot, Googlebot)" class="mt-sm" />
 
         <hr class="divider" />
+        <h3>Route Policies &amp; Webhook Protection</h3>
+        <form @submit.prevent="addRoutePolicy" class="row-form">
+          <input v-model="routePolicyForm.path_pattern" placeholder="/api/v1/transfer" required />
+          <select v-model="routePolicyForm.route_type">
+            <option value="api">API</option>
+            <option value="webhook">Webhook</option>
+            <option value="login">Login</option>
+            <option value="checkout">Checkout</option>
+          </select>
+          <button type="submit" class="btn-secondary">Add Route Policy</button>
+        </form>
+        <ul class="site-list">
+          <li v-for="rp in routePolicies" :key="rp.id" class="site-item">
+            <span><code>{{ rp.path_pattern }}</code> [{{ (rp.methods || []).join(',') }}] ({{ rp.route_type }}, {{ rp.rate_limit_rps }} rps)</span>
+            <button class="btn-secondary" @click="removeRoutePolicy(rp.id)">Remove</button>
+          </li>
+        </ul>
+
+        <hr class="divider" />
+        <h3>OpenAPI Schema &amp; Shadow API Inventory</h3>
+        <form @submit.prevent="importSchema">
+          <textarea v-model="openApiInput" rows="4" placeholder='{"openapi":"3.0.3","paths":{"/api/v1/orders":{"get":{}}}}' class="textarea"></textarea>
+          <button type="submit" class="btn-secondary mt-sm">Import OpenAPI Schema</button>
+        </form>
+        <ul class="site-list">
+          <li v-for="sc in apiSchemas" :key="sc.id" class="site-item">
+            <span>Schema v{{ sc.version }} ({{ (sc.endpoints || []).length }} endpoints) <span v-if="sc.active" class="badge active">active</span></span>
+            <button v-if="!sc.active" class="btn-secondary" @click="rollbackSchema(sc.version)">Rollback</button>
+          </li>
+        </ul>
+        <ul v-if="apiInventory.length" class="site-list">
+          <li v-for="inv in apiInventory" :key="inv.method + inv.normalized_path" class="site-item">
+            <span><code>{{ inv.method }} {{ inv.normalized_path }}</code> ({{ inv.hit_count }} hits)</span>
+            <span class="badge" :class="inv.documented ? 'active' : 'observe'">{{ inv.documented ? 'documented' : 'shadow' }}</span>
+          </li>
+        </ul>
+
+        <hr class="divider" />
         <h3>Scoped Rule Exclusions</h3>
         <form @submit.prevent="addExclusion" class="row-form">
           <input v-model="exclusionForm.route_prefix" placeholder="/api/webhooks/mpesa" required />
@@ -154,6 +192,11 @@ const originForm = ref({ upstream_url: '', rate_limit_rps: 50 });
 const wafForm = ref({ mode: 'monitor', crs_version: '4.10.0', max_inspect_body_bytes: 131072 });
 const botForm = ref({ mode: 'observe', challenge_difficulty: 3, allowlisted_bots: [] });
 const allowlistedBotsInput = ref('');
+const routePolicyForm = ref({ path_pattern: '/api/v1/', methods: ['GET', 'POST'], route_type: 'api', rate_limit_rps: 30, priority: 100 });
+const routePolicies = ref([]);
+const openApiInput = ref('');
+const apiSchemas = ref([]);
+const apiInventory = ref([]);
 const exclusionForm = ref({ route_prefix: '/', rule_id: '', reason: '' });
 const exclusions = ref([]);
 const securityEvents = ref([]);
@@ -175,10 +218,13 @@ async function selectSite(siteId) {
   selectedSiteId.value = siteId;
   error.value = '';
   try {
-    const [waf, bot, exRes] = await Promise.all([
+    const [waf, bot, exRes, rpRes, scRes, invRes] = await Promise.all([
       api.getWafPolicy(siteId),
       api.getBotPolicy(siteId),
-      api.listWafExclusions(siteId)
+      api.listWafExclusions(siteId),
+      api.listRoutePolicies(siteId),
+      api.listApiSchemas(siteId),
+      api.listApiInventory(siteId)
     ]);
     wafForm.value = {
       mode: waf.mode || 'monitor',
@@ -192,6 +238,54 @@ async function selectSite(siteId) {
     };
     allowlistedBotsInput.value = (bot.allowlisted_bots || []).join(', ');
     exclusions.value = exRes.exclusions || [];
+    routePolicies.value = rpRes.route_policies || [];
+    apiSchemas.value = scRes.schemas || [];
+    apiInventory.value = invRes.inventory || [];
+  } catch (err) {
+    error.value = err.message;
+  }
+}
+
+async function addRoutePolicy() {
+  error.value = '';
+  try {
+    await api.addRoutePolicy(selectedSiteId.value, routePolicyForm.value);
+    const rpRes = await api.listRoutePolicies(selectedSiteId.value);
+    routePolicies.value = rpRes.route_policies || [];
+  } catch (err) {
+    error.value = err.message;
+  }
+}
+
+async function removeRoutePolicy(policyId) {
+  error.value = '';
+  try {
+    await api.deleteRoutePolicy(selectedSiteId.value, policyId);
+    routePolicies.value = routePolicies.value.filter((p) => p.id !== policyId);
+  } catch (err) {
+    error.value = err.message;
+  }
+}
+
+async function importSchema() {
+  error.value = '';
+  try {
+    const parsed = JSON.parse(openApiInput.value);
+    await api.importApiSchema(selectedSiteId.value, parsed);
+    openApiInput.value = '';
+    const scRes = await api.listApiSchemas(selectedSiteId.value);
+    apiSchemas.value = scRes.schemas || [];
+  } catch (err) {
+    error.value = err.message;
+  }
+}
+
+async function rollbackSchema(version) {
+  error.value = '';
+  try {
+    await api.rollbackApiSchema(selectedSiteId.value, version);
+    const scRes = await api.listApiSchemas(selectedSiteId.value);
+    apiSchemas.value = scRes.schemas || [];
   } catch (err) {
     error.value = err.message;
   }
@@ -334,6 +428,7 @@ input, select { width: 100%; padding: 0.5rem; margin-top: 0.25rem; border: 1px s
 .badge.observe { background: #fef9c3; color: #854d0e; }
 .divider { border: none; border-top: 1px solid #e2e8f0; margin: 1.25rem 0; }
 .mt-sm { margin-top: 0.5rem; }
+.textarea { width: 100%; padding: 0.5rem; border: 1px solid #cbd5e1; border-radius: 6px; font-family: monospace; box-sizing: border-box; }
 .meta { font-size: 0.82rem; color: #475569; margin-top: 0.25rem; }
 .error { color: #b91c1c; font-size: 0.88rem; }
 </style>

@@ -7,9 +7,11 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/lanticell/control-api/internal/apipolicy"
 	"github.com/lanticell/control-api/internal/configpublish"
 	"github.com/lanticell/control-api/internal/crypto"
 	"github.com/lanticell/control-api/internal/store"
@@ -57,6 +59,14 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/sites/{id}/waf", s.requireAuth(s.requireWriteRole(http.HandlerFunc(s.handleUpsertWAFPolicy))))
 	mux.Handle("GET /api/v1/sites/{id}/bot-policy", s.requireAuth(http.HandlerFunc(s.handleGetBotPolicy)))
 	mux.Handle("PUT /api/v1/sites/{id}/bot-policy", s.requireAuth(s.requireWriteRole(http.HandlerFunc(s.handleUpsertBotPolicy))))
+	mux.Handle("GET /api/v1/sites/{id}/route-policies", s.requireAuth(http.HandlerFunc(s.handleListRoutePolicies)))
+	mux.Handle("POST /api/v1/sites/{id}/route-policies", s.requireAuth(s.requireWriteRole(http.HandlerFunc(s.handleAddRoutePolicy))))
+	mux.Handle("DELETE /api/v1/sites/{id}/route-policies/{policyId}", s.requireAuth(s.requireWriteRole(http.HandlerFunc(s.handleDeleteRoutePolicy))))
+	mux.Handle("GET /api/v1/sites/{id}/api-schemas", s.requireAuth(http.HandlerFunc(s.handleListAPISchemas)))
+	mux.Handle("POST /api/v1/sites/{id}/api-schemas", s.requireAuth(s.requireWriteRole(http.HandlerFunc(s.handleImportAPISchema))))
+	mux.Handle("POST /api/v1/sites/{id}/api-schemas/{version}/rollback", s.requireAuth(s.requireWriteRole(http.HandlerFunc(s.handleRollbackAPISchema))))
+	mux.Handle("GET /api/v1/sites/{id}/api-inventory", s.requireAuth(http.HandlerFunc(s.handleListAPIInventory)))
+	mux.Handle("POST /api/v1/hooks/auth-signal", s.requireAuth(http.HandlerFunc(s.handleAuthSignalHook)))
 	mux.Handle("GET /api/v1/sites/{id}/waf/exclusions", s.requireAuth(http.HandlerFunc(s.handleListWAFExclusions)))
 	mux.Handle("POST /api/v1/sites/{id}/waf/exclusions", s.requireAuth(s.requireWriteRole(http.HandlerFunc(s.handleAddWAFExclusion))))
 	mux.Handle("DELETE /api/v1/sites/{id}/waf/exclusions/{exclusionId}", s.requireAuth(s.requireWriteRole(http.HandlerFunc(s.handleDeleteWAFExclusion))))
@@ -66,6 +76,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/agent/config", s.requireAgentAuth(http.HandlerFunc(s.handleAgentConfig)))
 	mux.Handle("POST /api/v1/agent/health", s.requireAgentAuth(http.HandlerFunc(s.handleAgentHealth)))
 	mux.Handle("POST /api/v1/agent/events", s.requireAgentAuth(http.HandlerFunc(s.handleAgentEvents)))
+	mux.Handle("POST /api/v1/agent/inventory", s.requireAgentAuth(http.HandlerFunc(s.handleAgentInventory)))
 
 	return withCORS(mux)
 }
@@ -592,6 +603,200 @@ func (s *Server) handleUpsertBotPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	s.recordAudit(claims.TenantID, claims.UserID, "bot.policy_update", "site", siteID, map[string]string{"mode": pol.Mode})
 	writeJSON(w, http.StatusOK, pol)
+}
+
+func (s *Server) handleListRoutePolicies(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	siteID := r.PathValue("id")
+	list, err := s.Store.ListRoutePolicies(claims.TenantID, siteID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"route_policies": list})
+}
+
+func (s *Server) handleAddRoutePolicy(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	siteID := r.PathValue("id")
+	var req apipolicy.RoutePolicy
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32*1024)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if req.RouteType == "" {
+		req.RouteType = "api"
+	}
+	if req.RateLimitRPS == 0 {
+		req.RateLimitRPS = 30
+	}
+	if req.ActionOverride == "" {
+		req.ActionOverride = "inherit"
+	}
+	if req.Priority == 0 {
+		req.Priority = 100
+	}
+	if err := apipolicy.ValidateRoutePolicy(req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	polID, _ := crypto.RandomHex(12)
+	req.ID = polID
+	req.TenantID = claims.TenantID
+	req.SiteID = siteID
+
+	conflicts, err := s.Store.AddRoutePolicy(req)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if len(conflicts) > 0 {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":     "route policy conflict detected",
+			"conflicts": conflicts,
+		})
+		return
+	}
+	s.recordAudit(claims.TenantID, claims.UserID, "route_policy.add", "route_policy", req.ID, map[string]string{"path": req.PathPattern})
+	writeJSON(w, http.StatusCreated, req)
+}
+
+func (s *Server) handleDeleteRoutePolicy(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	siteID := r.PathValue("id")
+	polID := r.PathValue("policyId")
+	if err := s.Store.DeleteRoutePolicy(claims.TenantID, siteID, polID); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	s.recordAudit(claims.TenantID, claims.UserID, "route_policy.delete", "route_policy", polID, map[string]string{"site_id": siteID})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (s *Server) handleListAPISchemas(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	siteID := r.PathValue("id")
+	list, err := s.Store.ListAPISchemas(claims.TenantID, siteID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"schemas": list})
+}
+
+func (s *Server) handleImportAPISchema(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	siteID := r.PathValue("id")
+	var req struct {
+		OpenAPI json.RawMessage `json:"openapi"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 512*1024)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	endpoints, err := apipolicy.ParseOpenAPI(req.OpenAPI)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	schemaID, _ := crypto.RandomHex(12)
+	saved, err := s.Store.AddAPISchema(store.APISchemaVersion{
+		ID:        schemaID,
+		TenantID:  claims.TenantID,
+		SiteID:    siteID,
+		Endpoints: endpoints,
+		CreatedBy: claims.UserID,
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	s.recordAudit(claims.TenantID, claims.UserID, "api_schema.import", "site", siteID, map[string]string{"version": strconv.FormatInt(saved.Version, 10)})
+	writeJSON(w, http.StatusCreated, saved)
+}
+
+func (s *Server) handleRollbackAPISchema(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	siteID := r.PathValue("id")
+	ver, err := strconv.ParseInt(r.PathValue("version"), 10, 64)
+	if err != nil || ver < 1 {
+		writeError(w, http.StatusBadRequest, "invalid schema version")
+		return
+	}
+	rolled, err := s.Store.RollbackAPISchema(claims.TenantID, siteID, ver)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	s.recordAudit(claims.TenantID, claims.UserID, "api_schema.rollback", "site", siteID, map[string]string{"version": strconv.FormatInt(ver, 10)})
+	writeJSON(w, http.StatusOK, rolled)
+}
+
+func (s *Server) handleListAPIInventory(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	siteID := r.PathValue("id")
+	inv, err := s.Store.ListAPIInventory(claims.TenantID, siteID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"inventory": inv})
+}
+
+func (s *Server) handleAgentInventory(w http.ResponseWriter, r *http.Request) {
+	var entry store.APIInventoryEntry
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024)).Decode(&entry); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if entry.SiteID == "" || entry.TenantID == "" || entry.NormalizedPath == "" {
+		writeError(w, http.StatusBadRequest, "site_id, tenant_id, and normalized_path are required")
+		return
+	}
+	if entry.HitCount <= 0 {
+		entry.HitCount = 1
+	}
+	entry.LastSeenAt = time.Now().UTC()
+	s.Store.RecordAPIInventory(entry)
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "recorded"})
+}
+
+func (s *Server) handleAuthSignalHook(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFromContext(r.Context())
+	var req struct {
+		SiteID        string `json:"site_id"`
+		CorrelationID string `json:"correlation_id"`
+		Route         string `json:"route"`
+		SignalType    string `json:"signal_type"` // login_failed | otp_requested | password_reset
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if _, err := s.Store.GetSite(claims.TenantID, req.SiteID); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if req.SignalType != "login_failed" && req.SignalType != "otp_requested" && req.SignalType != "password_reset" {
+		writeError(w, http.StatusBadRequest, "unsupported signal_type")
+		return
+	}
+	evID, _ := crypto.RandomHex(12)
+	s.Store.AppendSecurityEvent(store.SecurityEvent{
+		ID:            evID,
+		SchemaVersion: "1.0",
+		CorrelationID: req.CorrelationID,
+		TenantID:      claims.TenantID,
+		SiteID:        req.SiteID,
+		Route:         req.Route,
+		RuleID:        "auth-hook",
+		Action:        "observe",
+		Confidence:    0.9,
+		ReasonCode:    req.SignalType,
+		CreatedAt:     time.Now().UTC(),
+	})
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 }
 
 func (s *Server) requireAuth(next http.Handler) http.Handler {

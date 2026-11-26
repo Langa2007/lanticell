@@ -207,4 +207,51 @@ func TestWAFPolicyExclusionsAndSecurityEvents(t *testing.T) {
 	if botRes.Code != http.StatusOK || !strings.Contains(botRes.Body.String(), "enforce") {
 		t.Fatalf("expected 200 updating bot policy, got %d: %s", botRes.Code, botRes.Body.String())
 	}
+
+	// Phase 4: Route policy + conflict detection
+	rp1 := doJSON(t, h, http.MethodPost, "/api/v1/sites/"+site.ID+"/route-policies", regResp.Token, map[string]any{
+		"path_pattern": "/api/v1/transfer",
+		"methods":      []string{"POST"},
+		"route_type":   "checkout",
+		"rate_limit_rps": 10,
+		"priority":     100,
+	})
+	if rp1.Code != http.StatusCreated {
+		t.Fatalf("expected 201 creating route policy, got %d: %s", rp1.Code, rp1.Body.String())
+	}
+
+	rpConflict := doJSON(t, h, http.MethodPost, "/api/v1/sites/"+site.ID+"/route-policies", regResp.Token, map[string]any{
+		"path_pattern":   "/api/v1/transfer",
+		"methods":        []string{"POST"},
+		"rate_limit_rps": 50,
+		"priority":       100,
+	})
+	if rpConflict.Code != http.StatusConflict {
+		t.Fatalf("expected 409 on conflicting route policy, got %d: %s", rpConflict.Code, rpConflict.Body.String())
+	}
+
+	// OpenAPI schema import v1, v2, and rollback to v1
+	schemaV1 := doJSON(t, h, http.MethodPost, "/api/v1/sites/"+site.ID+"/api-schemas", regResp.Token, map[string]any{
+		"openapi": map[string]any{
+			"openapi": "3.0.3",
+			"paths": map[string]any{
+				"/api/v1/transfer": map[string]any{"post": map[string]any{}},
+			},
+		},
+	})
+	if schemaV1.Code != http.StatusCreated {
+		t.Fatalf("expected 201 importing schema v1, got %d: %s", schemaV1.Code, schemaV1.Body.String())
+	}
+	_ = doJSON(t, h, http.MethodPost, "/api/v1/sites/"+site.ID+"/api-schemas", regResp.Token, map[string]any{
+		"openapi": map[string]any{
+			"openapi": "3.0.3",
+			"paths": map[string]any{
+				"/api/v1/payments": map[string]any{"post": map[string]any{}},
+			},
+		},
+	})
+	rb := doJSON(t, h, http.MethodPost, "/api/v1/sites/"+site.ID+"/api-schemas/1/rollback", regResp.Token, nil)
+	if rb.Code != http.StatusOK || !strings.Contains(rb.Body.String(), `"version":1`) {
+		t.Fatalf("expected 200 rolling back schema to v1, got %d: %s", rb.Code, rb.Body.String())
+	}
 }

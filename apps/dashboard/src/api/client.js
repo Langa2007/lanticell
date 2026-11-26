@@ -36,6 +36,17 @@ export function createApiClient({ baseUrl = DEFAULT_BASE, fetchImpl = fetch, get
     getBotPolicy: (siteId) => request(`/api/v1/sites/${siteId}/bot-policy`),
     upsertBotPolicy: (siteId, payload) =>
       request(`/api/v1/sites/${siteId}/bot-policy`, { method: 'PUT', body: payload }),
+    listRoutePolicies: (siteId) => request(`/api/v1/sites/${siteId}/route-policies`),
+    addRoutePolicy: (siteId, payload) =>
+      request(`/api/v1/sites/${siteId}/route-policies`, { method: 'POST', body: payload }),
+    deleteRoutePolicy: (siteId, policyId) =>
+      request(`/api/v1/sites/${siteId}/route-policies/${policyId}`, { method: 'DELETE' }),
+    listApiSchemas: (siteId) => request(`/api/v1/sites/${siteId}/api-schemas`),
+    importApiSchema: (siteId, openapiJson) =>
+      request(`/api/v1/sites/${siteId}/api-schemas`, { method: 'POST', body: { openapi: openapiJson } }),
+    rollbackApiSchema: (siteId, version) =>
+      request(`/api/v1/sites/${siteId}/api-schemas/${version}/rollback`, { method: 'POST' }),
+    listApiInventory: (siteId) => request(`/api/v1/sites/${siteId}/api-inventory`),
     listWafExclusions: (siteId) => request(`/api/v1/sites/${siteId}/waf/exclusions`),
     addWafExclusion: (siteId, payload) =>
       request(`/api/v1/sites/${siteId}/waf/exclusions`, { method: 'POST', body: payload }),

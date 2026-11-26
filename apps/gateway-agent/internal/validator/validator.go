@@ -21,6 +21,24 @@ type WAFExclusionRule struct {
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 }
 
+type RoutePolicy struct {
+	ID                    string   `json:"id"`
+	PathPattern           string   `json:"path_pattern"`
+	Methods               []string `json:"methods"`
+	RouteType             string   `json:"route_type"`
+	RateLimitRPS          int      `json:"rate_limit_rps"`
+	ActionOverride        string   `json:"action_override"`
+	ServiceAllowlistCIDRs []string `json:"service_allowlist_cidrs,omitempty"`
+	WebhookSigHeader      string   `json:"webhook_sig_header,omitempty"`
+	Priority              int      `json:"priority"`
+}
+
+type EndpointSpec struct {
+	Path           string   `json:"path"`
+	Method         string   `json:"method"`
+	RequiredParams []string `json:"required_params,omitempty"`
+}
+
 type SiteRouteConfig struct {
 	SiteID              string             `json:"site_id"`
 	TenantID            string             `json:"tenant_id"`
@@ -36,6 +54,10 @@ type SiteRouteConfig struct {
 	CRSVersion          string             `json:"crs_version"`
 	MaxInspectBodyBytes int64              `json:"max_inspect_body_bytes"`
 	WAFExclusions       []WAFExclusionRule `json:"waf_exclusions,omitempty"`
+	BotMode             string             `json:"bot_mode"`
+	AllowlistedBots     []string           `json:"allowlisted_bots,omitempty"`
+	RoutePolicies       []RoutePolicy      `json:"route_policies,omitempty"`
+	APISchemaEndpoints  []EndpointSpec     `json:"api_schema_endpoints,omitempty"`
 }
 
 type ConfigBundle struct {

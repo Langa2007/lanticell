@@ -4,6 +4,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/lanticell/control-api/internal/apipolicy"
 )
 
 var (
@@ -94,6 +96,27 @@ type BotPolicy struct {
 	UpdatedAt           time.Time `json:"updated_at"`
 }
 
+type APISchemaVersion struct {
+	ID        string                   `json:"id"`
+	TenantID  string                   `json:"tenant_id"`
+	SiteID    string                   `json:"site_id"`
+	Version   int64                    `json:"version"`
+	Endpoints []apipolicy.EndpointSpec `json:"endpoints"`
+	Active    bool                     `json:"active"`
+	CreatedBy string                   `json:"created_by"`
+	CreatedAt time.Time                `json:"created_at"`
+}
+
+type APIInventoryEntry struct {
+	SiteID         string    `json:"site_id"`
+	TenantID       string    `json:"tenant_id"`
+	Method         string    `json:"method"`
+	NormalizedPath string    `json:"normalized_path"`
+	Documented     bool      `json:"documented"`
+	HitCount       int64     `json:"hit_count"`
+	LastSeenAt     time.Time `json:"last_seen_at"`
+}
+
 type WAFExclusion struct {
 	ID          string     `json:"id"`
 	TenantID    string     `json:"tenant_id"`
@@ -132,6 +155,9 @@ type Store struct {
 	wafPolicies    map[string]WAFPolicy // key: siteID
 	botPolicies    map[string]BotPolicy // key: siteID
 	wafExclusions  map[string][]WAFExclusion // key: siteID
+	routePolicies  map[string][]apipolicy.RoutePolicy // key: siteID
+	apiSchemas     map[string][]APISchemaVersion      // key: siteID
+	apiInventory   map[string][]APIInventoryEntry     // key: siteID
 	securityEvents []SecurityEvent
 	auditLogs      []AuditLog
 	gateways       map[string]GatewayNode
@@ -148,6 +174,9 @@ func NewStore() *Store {
 		wafPolicies:   make(map[string]WAFPolicy),
 		botPolicies:   make(map[string]BotPolicy),
 		wafExclusions: make(map[string][]WAFExclusion),
+		routePolicies: make(map[string][]apipolicy.RoutePolicy),
+		apiSchemas:    make(map[string][]APISchemaVersion),
+		apiInventory:  make(map[string][]APIInventoryEntry),
 		gateways:      make(map[string]GatewayNode),
 		version:       1,
 	}
@@ -443,4 +472,167 @@ func (s *Store) GetBotPolicy(tenantID, siteID string) BotPolicy {
 		Mode:                "observe",
 		ChallengeDifficulty: 3,
 	}
+}
+
+func (s *Store) AddRoutePolicy(p apipolicy.RoutePolicy) ([]apipolicy.PolicyConflict, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	site, ok := s.sites[p.SiteID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if site.TenantID != p.TenantID {
+		return nil, ErrForbidden
+	}
+	existing := s.routePolicies[p.SiteID]
+	if conflicts := apipolicy.DetectConflicts(existing, p); len(conflicts) > 0 {
+		return conflicts, nil
+	}
+	s.routePolicies[p.SiteID] = append(existing, p)
+	s.version++
+	return nil, nil
+}
+
+func (s *Store) ListRoutePolicies(tenantID, siteID string) ([]apipolicy.RoutePolicy, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	site, ok := s.sites[siteID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if site.TenantID != tenantID {
+		return nil, ErrForbidden
+	}
+	list := s.routePolicies[siteID]
+	out := make([]apipolicy.RoutePolicy, len(list))
+	copy(out, list)
+	return out, nil
+}
+
+func (s *Store) DeleteRoutePolicy(tenantID, siteID, policyID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	site, ok := s.sites[siteID]
+	if !ok {
+		return ErrNotFound
+	}
+	if site.TenantID != tenantID {
+		return ErrForbidden
+	}
+	list := s.routePolicies[siteID]
+	for i, p := range list {
+		if p.ID == policyID {
+			s.routePolicies[siteID] = append(list[:i], list[i+1:]...)
+			s.version++
+			return nil
+		}
+	}
+	return ErrNotFound
+}
+
+func (s *Store) AddAPISchema(schema APISchemaVersion) (APISchemaVersion, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	site, ok := s.sites[schema.SiteID]
+	if !ok {
+		return APISchemaVersion{}, ErrNotFound
+	}
+	if site.TenantID != schema.TenantID {
+		return APISchemaVersion{}, ErrForbidden
+	}
+	list := s.apiSchemas[schema.SiteID]
+	for i := range list {
+		list[i].Active = false
+	}
+	schema.Version = int64(len(list) + 1)
+	schema.Active = true
+	s.apiSchemas[schema.SiteID] = append(list, schema)
+	s.version++
+	return schema, nil
+}
+
+func (s *Store) ListAPISchemas(tenantID, siteID string) ([]APISchemaVersion, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	site, ok := s.sites[siteID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if site.TenantID != tenantID {
+		return nil, ErrForbidden
+	}
+	list := s.apiSchemas[siteID]
+	out := make([]APISchemaVersion, len(list))
+	copy(out, list)
+	return out, nil
+}
+
+func (s *Store) RollbackAPISchema(tenantID, siteID string, targetVersion int64) (APISchemaVersion, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	site, ok := s.sites[siteID]
+	if !ok {
+		return APISchemaVersion{}, ErrNotFound
+	}
+	if site.TenantID != tenantID {
+		return APISchemaVersion{}, ErrForbidden
+	}
+	list := s.apiSchemas[siteID]
+	foundIdx := -1
+	for i := range list {
+		if list[i].Version == targetVersion {
+			foundIdx = i
+		}
+		list[i].Active = false
+	}
+	if foundIdx == -1 {
+		return APISchemaVersion{}, ErrNotFound
+	}
+	list[foundIdx].Active = true
+	s.apiSchemas[siteID] = list
+	s.version++
+	return list[foundIdx], nil
+}
+
+func (s *Store) ActiveAPISchemaEndpoints(siteID string) []apipolicy.EndpointSpec {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, sc := range s.apiSchemas[siteID] {
+		if sc.Active {
+			return sc.Endpoints
+		}
+	}
+	return nil
+}
+
+func (s *Store) RecordAPIInventory(entry APIInventoryEntry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	list := s.apiInventory[entry.SiteID]
+	for i := range list {
+		if list[i].Method == entry.Method && list[i].NormalizedPath == entry.NormalizedPath {
+			list[i].HitCount += entry.HitCount
+			list[i].Documented = entry.Documented
+			list[i].LastSeenAt = entry.LastSeenAt
+			s.apiInventory[entry.SiteID] = list
+			return
+		}
+	}
+	s.apiInventory[entry.SiteID] = append(list, entry)
+}
+
+func (s *Store) ListAPIInventory(tenantID, siteID string) ([]APIInventoryEntry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	site, ok := s.sites[siteID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if site.TenantID != tenantID {
+		return nil, ErrForbidden
+	}
+	list := s.apiInventory[siteID]
+	out := make([]APIInventoryEntry, len(list))
+	copy(out, list)
+	return out, nil
 }

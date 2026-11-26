@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lanticell/control-api/internal/apipolicy"
 	"github.com/lanticell/control-api/internal/crypto"
 	"github.com/lanticell/control-api/internal/store"
 )
@@ -40,8 +41,10 @@ type SiteRouteConfig struct {
 	CRSVersion          string             `json:"crs_version"`
 	MaxInspectBodyBytes int64              `json:"max_inspect_body_bytes"`
 	WAFExclusions       []WAFExclusionRule `json:"waf_exclusions,omitempty"`
-	BotMode             string             `json:"bot_mode"`
-	AllowlistedBots     []string           `json:"allowlisted_bots,omitempty"`
+	BotMode             string                   `json:"bot_mode"`
+	AllowlistedBots     []string                 `json:"allowlisted_bots,omitempty"`
+	RoutePolicies       []apipolicy.RoutePolicy  `json:"route_policies,omitempty"`
+	APISchemaEndpoints  []apipolicy.EndpointSpec `json:"api_schema_endpoints,omitempty"`
 }
 
 // ConfigBundle is the signed, versioned payload fetched by gateway-agent.
@@ -141,6 +144,8 @@ func BuildSignedBundle(st *store.Store, encKey, signingKey []byte) (ConfigBundle
 		wafPol := st.GetWAFPolicy(site.TenantID, site.ID)
 		botPol := st.GetBotPolicy(site.TenantID, site.ID)
 		rawExclusions, _ := st.ListWAFExclusions(site.TenantID, site.ID)
+		routePolicies, _ := st.ListRoutePolicies(site.TenantID, site.ID)
+		apiEndpoints := st.ActiveAPISchemaEndpoints(site.ID)
 		activeExclusions := make([]WAFExclusionRule, 0, len(rawExclusions))
 		for _, ex := range rawExclusions {
 			if ex.ExpiresAt != nil && ex.ExpiresAt.Before(now) {
@@ -170,6 +175,8 @@ func BuildSignedBundle(st *store.Store, encKey, signingKey []byte) (ConfigBundle
 			WAFExclusions:       activeExclusions,
 			BotMode:             botPol.Mode,
 			AllowlistedBots:     botPol.AllowlistedBots,
+			RoutePolicies:       routePolicies,
+			APISchemaEndpoints:  apiEndpoints,
 		})
 	}
 

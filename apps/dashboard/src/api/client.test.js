@@ -46,12 +46,16 @@ test('createApiClient calls WAF policy and exclusion endpoints', async () => {
   const api = createApiClient({ baseUrl: 'http://localhost:8080', fetchImpl: mockFetch });
   await api.upsertWafPolicy('s1', { mode: 'block' });
   await api.upsertBotPolicy('s1', { mode: 'enforce', challenge_difficulty: 3 });
+  await api.addRoutePolicy('s1', { path_pattern: '/api/v1/transfer', methods: ['POST'] });
+  await api.rollbackApiSchema('s1', 1);
   await api.addWafExclusion('s1', { route_prefix: '/api/webhooks/mpesa', rule_id: '942100', reason: 'test' });
   await api.listSecurityEvents();
 
   assert.deepEqual(calls, [
     { url: 'http://localhost:8080/api/v1/sites/s1/waf', method: 'PUT' },
     { url: 'http://localhost:8080/api/v1/sites/s1/bot-policy', method: 'PUT' },
+    { url: 'http://localhost:8080/api/v1/sites/s1/route-policies', method: 'POST' },
+    { url: 'http://localhost:8080/api/v1/sites/s1/api-schemas/1/rollback', method: 'POST' },
     { url: 'http://localhost:8080/api/v1/sites/s1/waf/exclusions', method: 'POST' },
     { url: 'http://localhost:8080/api/v1/security-events', method: 'GET' }
   ]);
